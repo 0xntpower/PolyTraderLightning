@@ -32,6 +32,7 @@ if TYPE_CHECKING:
     from shared.decay_detector import DecayState
     from strategy.kelly import AdjustedWinRateResult, KellyResult
     from strategy.momentum_signal import MomentumSignalConfig
+    from strategy.resolution import ResolutionResult
     from strategy.signal import Signal
 
 log = logging.getLogger(__name__)
@@ -244,6 +245,8 @@ class StatePublisher:
         # Risk
         halted: bool,
         halt_reason: str,
+        # Last bet resolution
+        last_resolution: ResolutionResult | None,
         # Feed health
         last_binance_msg_ts: float,
         last_chainlink_msg_ts: float,
@@ -377,6 +380,14 @@ class StatePublisher:
             "halted": halted,
             "halt_reason": halt_reason,
         }
+
+        # -- Last bet resolution --
+        if last_resolution is not None:
+            snapshot["last_resolution"] = {
+                "won": last_resolution.won,
+                "pnl": round(last_resolution.pnl, 4),
+                "window_ts": last_resolution.pending.window_ts,
+            }
 
         # -- Feed health --
         snapshot["feeds"] = {

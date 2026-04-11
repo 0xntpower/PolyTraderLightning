@@ -955,8 +955,7 @@ async def _strategy_loop(
                     window_tracker.open_price_fetched = True
                     if old_price > 0 and abs(gamma_price - old_price) >= 0.01:
                         log.info(
-                            "open price UPGRADED: $%.2f → $%.2f "
-                            "(tier %d → Gamma, diff=$%.2f)",
+                            "open price UPGRADED: $%.2f → $%.2f (tier %d → Gamma, diff=$%.2f)",
                             old_price,
                             gamma_price,
                             old_tier,
@@ -1026,6 +1025,7 @@ async def _strategy_loop(
                     consecutive_losses=position_tracker.consecutive_losses,
                     halted=risk.halted,
                     halt_reason=risk.halt_reason,
+                    last_resolution=resolution_mgr.last_result,
                     last_binance_msg_ts=state.last_binance_msg_ts,
                     last_chainlink_msg_ts=state.last_chainlink_msg_ts,
                     last_clob_market_msg_ts=state.last_clob_market_msg_ts,

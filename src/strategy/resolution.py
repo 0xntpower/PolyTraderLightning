@@ -107,6 +107,7 @@ class ResolutionManager:
         self._cfg = cfg
         self._paths = paths
         self._pending: PendingResolution | None = None
+        self._last_result: ResolutionResult | None = None
 
     @property
     def decay_detector(self) -> DecayDetector:
@@ -123,6 +124,10 @@ class ResolutionManager:
     @property
     def pending(self) -> PendingResolution | None:
         return self._pending
+
+    @property
+    def last_result(self) -> ResolutionResult | None:
+        return self._last_result
 
     def create_pending(
         self,
@@ -438,12 +443,14 @@ class ResolutionManager:
         # Clear pending
         self._pending = None
 
-        return ResolutionResult(
+        result = ResolutionResult(
             won=won,
             pnl=pnl,
             verdict=ds.verdict,
             pending=pr,
         )
+        self._last_result = result
+        return result
 
     def _apply_bookkeeping(
         self,

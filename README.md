@@ -1,0 +1,26 @@
+# PolyTraderLightning
+
+High-performance trading bot for Polymarket's BTC 5-minute Up/Down markets. Receives signals from the SignalOrchestrator via IPC and executes trades on the Polymarket CLOB.
+
+## Deployment
+
+Runs on a dedicated VPS (AWS Dublin) for low-latency execution (~23ms to Polymarket CLOB). The lab machine runs the collector, engine, and orchestrator; signals are delivered over a Tailscale mesh VPN.
+
+See `docs/infrastructure/vps_deployment.md` for full deployment details.
+
+## Key Features
+
+- **4 WebSocket feeds** — Binance, Chainlink, Polymarket CLOB (market + user streams)
+- **250ms strategy tick** — evaluates signal entry conditions every quarter second
+- **Kelly Criterion bet sizing** — quarter-Kelly with regime-adjusted win probabilities
+- **SPRT decay detection** — detects signal degradation and enters shadow tracking mode
+- **Regime adjustments** — volatility and chop discounts on win probability
+- **Paper and live modes** — full simulation with identical logic, or real CLOB execution
+
+## Configuration
+
+`config.yml` (gitignored) — see `docs/reference/configuration_guide.md` for all parameters.
+
+## Shared Library
+
+The `shared/` directory contains modules used across the entire PolySignalLab system: IPC protocol, Discord notifications, signal ranking, risk management, decay detection, and configuration utilities.

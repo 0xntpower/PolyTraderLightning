@@ -1,0 +1,450 @@
+"""Load, validate, and expose bot configuration."""
+
+from __future__ import annotations
+
+import logging
+import sys
+from dataclasses import dataclass, field, fields
+from pathlib import Path
+from typing import (
+    Any,  # YAML boundary: untyped config values narrowed via dataclasses
+)
+
+import yaml
+
+_log = logging.getLogger(__name__)
+
+CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.yml"
+
+DEFAULT_CONFIG = """\
+# =============================================================================
+# Polymarket BTC 5-Minute Trading Bot - Configuration
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Mode
+# ---------------------------------------------------------------------------
+mode:
+  trading: "paper"         # "paper" or "live"
+  log_level: "INFO"        # DEBUG, INFO, WARNING, ERROR
+  log_dir: "data/logs"     # directory for log files
+  log_retention_days: 7    # delete log files older than this many days
+
+# ---------------------------------------------------------------------------
+# Strategy - signal execution and entry filters
+# ---------------------------------------------------------------------------
+rules_strategy:
+  enabled: true
+  max_position_usd: 10.0    # Max USDC to risk per window
+  entry_window_stop: 5      # Stop entering within N seconds of close
+  min_win_rate: 0.50         # Reject signals below this OOS win rate (fraction)
+  maker_timeout_s: 5.0       # Maker order timeout before taker fallback (0=taker only)
+  max_chop_flips: 0          # Skip trade if avg chop flips >= this (0=disabled)
+  max_entry_gap_pct: 20.0    # Skip if bid >N% below signal avg_entry (0=disabled)
+
+# ---------------------------------------------------------------------------
+# Risk management
+# ---------------------------------------------------------------------------
+risk:
+  max_daily_loss_usd: 100.0
+  max_consecutive_losses: 10
+  cancel_unfilled_at_sec: 5
+  max_position_per_window_usd: 75.0
+
+# ---------------------------------------------------------------------------
+# Data connections
+# ---------------------------------------------------------------------------
+connections:
+  binance_ws: "wss://stream.binance.com:9443/stream?streams=btcusdt@trade/btcusdt@depth5@100ms"
+  rtds_ws: "wss://ws-live-data.polymarket.com"
+  clob_market_ws: "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+  clob_user_ws: "wss://ws-subscriptions-clob.polymarket.com/ws/user"
+  clob_rest: "https://clob.polymarket.com"
+  gamma_rest: "https://gamma-api.polymarket.com"
+  chain_id: 137
+  signature_type: 1          # Polymarket CLOB: 0=EOA, 1=Magic/proxy, 2=Gnosis Safe
+  rtds_ping_interval_sec: 5
+  reconnect_base_delay_sec: 1.0
+  reconnect_max_delay_sec: 30.0
+  binance_stale_sec: 15.0
+  chainlink_stale_sec: 30.0
+  clob_book_stale_sec: 60.0
+
+# ---------------------------------------------------------------------------
+# Paper trading
+# ---------------------------------------------------------------------------
+paper:
+  log_every_window: true
+  simulated_fill_delay_sec: 2.5
+  starting_balance_usd: 1000.0
+
+# ---------------------------------------------------------------------------
+# IPC - orchestrator signal delivery
+# ---------------------------------------------------------------------------
+ipc:
+  host: "127.0.0.1"
+  port: 19731
+  stale_signal_warning_hours: 6
+  visualizer_enabled: true
+
+# ---------------------------------------------------------------------------
+# Signal lifecycle - signal health, decay, and age scaling
+# ---------------------------------------------------------------------------
+signal_lifecycle:
+  fire_stall_windows: 50         # ~4 hours with no fires = fire-rate stall
+  shadow_tracking_windows: 500   # ~42 hours of continued observation after decay
+  bet_scaling_enabled: true
+  age_taper_start_windows: 300   # ~25 hours - no age effect before this
+  age_taper_end_windows: 500     # ~42 hours - age taper fully applied
+  age_floor: 0.5                 # age alone never reduces below 50%
+  min_bet_scale: 0.10            # absolute floor - never bet less than 10% of base
+  sprt_activation_minutes: 45    # SPRT only affects sizing after this long without update
+
+# ---------------------------------------------------------------------------
+# Bet sizing - Kelly criterion and bankroll management
+# ---------------------------------------------------------------------------
+sizing:
+  kelly_fraction: 0.25           # quarter-Kelly (conservative start)
+  kelly_min_bet: 1.00            # minimum $1 bet, below this skip
+  kelly_max_bet_pct: 5.0         # max bet as % of bankroll
+  bankroll: 1000.00              # starting/current bankroll for Kelly sizing
+  warmup_minutes: 30.0           # cap bets to min for this long after start (0=off)
+  wilson_max_shrink_pct: 3.0     # max Wilson win rate correction (percentage points)
+  kelly_regime_cap: 0.12         # max regime penalty on win rate (all factors combined)
+  vol_weight: 1.0                # regime weight for volatility (0-1)
+  chop_weight: 1.0               # regime weight for chop (0-1)
+  outcome_weight: 0.8            # regime weight for outcome bias (0-1)
+  feedback_min_trades: 10        # trades before performance feedback activates
+
+# ---------------------------------------------------------------------------
+# Regime detection - volatility, chop, and outcome bias
+# ---------------------------------------------------------------------------
+regime:
+  vol_lookback_windows: 24       # ~2 hours of 5-min returns
+  vol_normal_pct: 0.10           # normal vol (stddev) - no bet reduction
+  vol_high_pct: 0.30             # high vol (stddev) - full severity
+  vol_min_samples: 6             # min returns before vol scaling is active
+  chop_lookback_windows: 6       # ~30 min of recent windows
+  chop_normal_flips: 3.0         # normal direction flips per window
+  chop_high_flips: 10.0          # high chop - full severity
+  chop_min_samples: 3            # min windows before chop scaling is active
+  outcome_lookback_windows: 6    # rolling window of recent outcomes
+  outcome_normal_agreement: 0.50 # 50% agreement = no concern
+  outcome_high_agreement: 0.15   # 15% agreement = full severity
+  cache_staleness_minutes: 30.0  # discard cached regime data older than this (0=off)
+
+# ---------------------------------------------------------------------------
+# Erosion - post-fire CUSUM exit detection
+# ---------------------------------------------------------------------------
+erosion:
+  ema_alpha: 0.10                # EMA smoothing on raw erosion (half-life ~1.7s at 4Hz)
+  cusum_tolerance: 0.05          # ignore exceedances < 5% above threshold
+  cusum_limit: 0.80              # cumulative excess needed to trigger exit
+  cusum_decay: 0.95              # CUSUM bleed-off rate when erosion dips below threshold
+  panic_multiplier: 1.50         # immediate exit if erosion > 1.5x threshold
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class ModeConfig:
+    trading: str = "paper"
+    log_level: str = "INFO"
+    log_dir: str = "data/logs"
+    log_retention_days: int = 7
+
+
+@dataclass(frozen=True, slots=True)
+class RulesStrategyConfig:
+    enabled: bool = True
+    max_position_usd: float = 10.0
+    entry_window_stop: int = 5
+    min_win_rate: float = 0.50
+    maker_timeout_s: float = 5.0
+    max_chop_flips: int = 0  # skip if avg chop flips >= this (0=disabled)
+    max_entry_gap_pct: float = 20.0  # skip if bid >N% below avg_entry (0=disabled)
+
+
+@dataclass(frozen=True, slots=True)
+class RiskConfig:
+    max_daily_loss_usd: float = 100.0
+    max_consecutive_losses: int = 10
+    cancel_unfilled_at_sec: int = 5
+    max_position_per_window_usd: float = 75.0
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectionsConfig:
+    binance_ws: str = (
+        "wss://stream.binance.com:9443/stream?streams=btcusdt@trade/btcusdt@depth5@100ms"
+    )
+    rtds_ws: str = "wss://ws-live-data.polymarket.com"
+    clob_market_ws: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+    clob_user_ws: str = "wss://ws-subscriptions-clob.polymarket.com/ws/user"
+    clob_rest: str = "https://clob.polymarket.com"
+    gamma_rest: str = "https://gamma-api.polymarket.com"
+    chain_id: int = 137
+    signature_type: int = 1  # Polymarket CLOB: 0=EOA, 1=Magic/proxy, 2=Gnosis Safe
+    rtds_ping_interval_sec: int = 5
+    reconnect_base_delay_sec: float = 1.0
+    reconnect_max_delay_sec: float = 30.0
+    binance_stale_sec: float = 15.0
+    chainlink_stale_sec: float = 30.0
+    clob_book_stale_sec: float = 60.0
+
+
+@dataclass(frozen=True, slots=True)
+class PaperConfig:
+    log_every_window: bool = True
+    simulated_fill_delay_sec: float = 2.5
+    starting_balance_usd: float = 1000.0
+
+
+@dataclass(frozen=True, slots=True)
+class IpcConfig:
+    host: str = "127.0.0.1"
+    port: int = 19731
+    stale_signal_warning_hours: float = 6.0
+    visualizer_enabled: bool = True
+    visualizer_host: str = "0.0.0.0"  # noqa: S104  # nosec B104  # intentional: Tailscale
+    visualizer_port: int = 19732
+
+
+@dataclass(frozen=True, slots=True)
+class SignalLifecycleConfig:
+    fire_stall_windows: int = 50
+    shadow_tracking_windows: int = 500
+    bet_scaling_enabled: bool = True
+    age_taper_start_windows: int = 300
+    age_taper_end_windows: int = 500
+    age_floor: float = 0.5
+    min_bet_scale: float = 0.10
+    sprt_activation_minutes: float = 45.0
+
+
+@dataclass(frozen=True, slots=True)
+class SizingConfig:
+    kelly_fraction: float = 0.25
+    kelly_min_bet: float = 1.00
+    kelly_max_bet_pct: float = 5.0
+    bankroll: float = 1000.00
+    warmup_minutes: float = 30.0
+    wilson_max_shrink_pct: float = 3.0  # max Wilson win rate correction (%)
+    kelly_regime_cap: float = 0.12  # max regime penalty on win rate
+    vol_weight: float = 1.0  # regime weight for volatility (0-1)
+    chop_weight: float = 1.0  # regime weight for chop (0-1)
+    outcome_weight: float = 0.8  # regime weight for outcome bias (0-1)
+    feedback_min_trades: int = 10  # trades before performance feedback
+
+
+@dataclass(frozen=True, slots=True)
+class RegimeConfig:
+    vol_lookback_windows: int = 24
+    vol_normal_pct: float = 0.10
+    vol_high_pct: float = 0.30
+    vol_min_samples: int = 6
+    chop_lookback_windows: int = 6
+    chop_normal_flips: float = 3.0
+    chop_high_flips: float = 10.0
+    chop_min_samples: int = 3
+    outcome_lookback_windows: int = 6
+    outcome_normal_agreement: float = 0.50
+    outcome_high_agreement: float = 0.15
+    cache_staleness_minutes: float = 30.0
+
+
+@dataclass(frozen=True, slots=True)
+class ErosionConfig:
+    ema_alpha: float = 0.10
+    cusum_tolerance: float = 0.05
+    cusum_limit: float = 0.80
+    cusum_decay: float = 0.95
+    panic_multiplier: float = 1.50
+
+
+@dataclass(frozen=True, slots=True)
+class Config:
+    mode: ModeConfig = field(default_factory=ModeConfig)
+    rules_strategy: RulesStrategyConfig = field(default_factory=RulesStrategyConfig)
+    risk: RiskConfig = field(default_factory=RiskConfig)
+    connections: ConnectionsConfig = field(default_factory=ConnectionsConfig)
+    paper: PaperConfig = field(default_factory=PaperConfig)
+    ipc: IpcConfig = field(default_factory=IpcConfig)
+    signal_lifecycle: SignalLifecycleConfig = field(default_factory=SignalLifecycleConfig)
+    sizing: SizingConfig = field(default_factory=SizingConfig)
+    regime: RegimeConfig = field(default_factory=RegimeConfig)
+    erosion: ErosionConfig = field(default_factory=ErosionConfig)
+
+    @property
+    def is_paper(self) -> bool:
+        return self.mode.trading == "paper"
+
+    def data_paths(self, repo_root: Path) -> DataPaths:
+        """Compute all mode-dependent data paths from a single root."""
+        mode = self.mode.trading  # "paper" or "live"
+        base = repo_root / "data" / mode
+        return DataPaths(
+            bankroll=base / "bankroll.json",
+            journal=base / "journal.jsonl",
+            state=base / "state.json",
+            results=base / "results",
+            logs=repo_root / self.mode.log_dir,
+            vol_cache=base / "vol_cache.json",
+            chop_cache=base / "chop_cache.json",
+            outcome_cache=base / "outcome_cache.json",
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class DataPaths:
+    """All mode-dependent file paths, computed from Config."""
+
+    bankroll: Path
+    journal: Path
+    state: Path
+    results: Path
+    logs: Path
+    vol_cache: Path = Path("data/paper/vol_cache.json")
+    chop_cache: Path = Path("data/paper/chop_cache.json")
+    outcome_cache: Path = Path("data/paper/outcome_cache.json")
+
+    def ensure_dirs(self) -> None:
+        """Create all necessary directories."""
+        self.bankroll.parent.mkdir(parents=True, exist_ok=True)
+        self.journal.parent.mkdir(parents=True, exist_ok=True)
+        self.state.parent.mkdir(parents=True, exist_ok=True)
+        self.results.mkdir(parents=True, exist_ok=True)
+        self.logs.mkdir(parents=True, exist_ok=True)
+
+
+# Section name -> dataclass class mapping for auto-update
+_SECTION_MAP: dict[str, type] = {
+    "mode": ModeConfig,
+    "rules_strategy": RulesStrategyConfig,
+    "risk": RiskConfig,
+    "connections": ConnectionsConfig,
+    "paper": PaperConfig,
+    "ipc": IpcConfig,
+    "signal_lifecycle": SignalLifecycleConfig,
+    "sizing": SizingConfig,
+    "regime": RegimeConfig,
+    "erosion": ErosionConfig,
+}
+
+
+def _auto_update_config(raw: dict[str, Any], config_path: Path) -> None:
+    """Sync config.yml schema with current dataclass definitions.
+
+    Adds missing fields with their defaults, removes fields that no longer
+    exist in the dataclass. Preserves all user-set values. Writes back to
+    disk only if changes are needed.
+    """
+    changes: list[str] = []
+
+    for section_name, dc_cls in _SECTION_MAP.items():
+        dc_fields = {f.name for f in fields(dc_cls)}
+        dc_defaults = dc_cls()
+        section = raw.get(section_name)
+
+        if section is None:
+            # Entire section missing - add it with all defaults
+            raw[section_name] = {f.name: getattr(dc_defaults, f.name) for f in fields(dc_cls)}
+            changes.append(f"added missing section [{section_name}]")
+            continue
+
+        yaml_keys = set(section.keys())
+
+        # Add new fields (in dataclass but not in YAML)
+        added = dc_fields - yaml_keys
+        for key in sorted(added):
+            section[key] = getattr(dc_defaults, key)
+            changes.append(f"[{section_name}] added '{key}' = {section[key]!r}")
+
+        # Remove old fields (in YAML but not in dataclass)
+        removed = yaml_keys - dc_fields
+        for key in sorted(removed):
+            del section[key]
+            changes.append(f"[{section_name}] removed obsolete '{key}'")
+
+    # Also detect top-level sections in YAML that don't map to any dataclass
+    known_sections = set(_SECTION_MAP.keys())
+    for top_key in list(raw.keys()):
+        if top_key not in known_sections:
+            del raw[top_key]
+            changes.append(f"removed unknown top-level section [{top_key}]")
+
+    if not changes:
+        return
+
+    # Write updated config back to disk
+    try:
+        # Preserve section order matching _SECTION_MAP
+        ordered: dict[str, Any] = {}
+        for section_name in _SECTION_MAP:
+            if section_name in raw:
+                ordered[section_name] = raw[section_name]
+
+        output = yaml.dump(
+            ordered,
+            default_flow_style=False,
+            sort_keys=False,
+            allow_unicode=True,
+            width=120,
+        )
+        config_path.write_text(output, encoding="utf-8")
+        _log.info("config.yml auto-updated with %d change(s):", len(changes))
+        for c in changes:
+            _log.info("  config: %s", c)
+    except OSError as exc:
+        _log.warning("failed to write updated config.yml: %s", exc)
+
+
+def _parse_section(raw: dict[str, Any], key: str, cls: type) -> Any:
+    """Parse a YAML section into a dataclass, filtering unknown keys."""
+    section = raw.get(key, {})
+    if not section:
+        return cls()
+    known = {f.name for f in fields(cls)}
+    return cls(**{k: v for k, v in section.items() if k in known})
+
+
+def load_config() -> Config:
+    """Load config.yml and return validated Config."""
+    if not CONFIG_PATH.exists():
+        CONFIG_PATH.write_text(DEFAULT_CONFIG)
+        print(f"config.yml created with defaults at {CONFIG_PATH} -- review it before running.")
+        sys.exit(0)
+
+    raw = yaml.safe_load(CONFIG_PATH.read_text())
+    if not raw:
+        print("config.yml is empty -- delete it and restart to regenerate defaults.")
+        sys.exit(1)
+
+    # Auto-update config.yml schema (add new fields, remove obsolete ones)
+    _auto_update_config(raw, CONFIG_PATH)
+
+    cfg = Config(
+        mode=_parse_section(raw, "mode", ModeConfig),
+        rules_strategy=_parse_section(raw, "rules_strategy", RulesStrategyConfig),
+        risk=_parse_section(raw, "risk", RiskConfig),
+        connections=_parse_section(raw, "connections", ConnectionsConfig),
+        paper=_parse_section(raw, "paper", PaperConfig),
+        ipc=_parse_section(raw, "ipc", IpcConfig),
+        signal_lifecycle=_parse_section(raw, "signal_lifecycle", SignalLifecycleConfig),
+        sizing=_parse_section(raw, "sizing", SizingConfig),
+        regime=_parse_section(raw, "regime", RegimeConfig),
+        erosion=_parse_section(raw, "erosion", ErosionConfig),
+    )
+
+    _validate(cfg)
+
+    return cfg
+
+
+def _validate(cfg: Config) -> None:
+    if cfg.mode.trading not in ("paper", "live"):
+        print(f"Invalid mode.trading: {cfg.mode.trading!r} -- must be 'paper' or 'live'")
+        sys.exit(1)
+
+    if cfg.mode.log_level.upper() not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+        print(f"Invalid log_level: {cfg.mode.log_level!r}")
+        sys.exit(1)

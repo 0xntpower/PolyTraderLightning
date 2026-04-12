@@ -153,6 +153,12 @@ class MomentumSignalStrategy:
         self._erosion_last_log_time: float = 0.0
         self._erosion_last_logged_val: float = 0.0
         self._erosion_last_logged_cusum: float = 0.0
+        # Monotonic timestamp when erosion first breached the panic line.
+        # Reset to None whenever erosion drops below panic threshold. Panic
+        # only fires once the breach has persisted >= panic_min_duration_s;
+        # a brief noise blip on 2026-04-12 14:41 turned a winning trade
+        # into a -$20 loss under the previous single-tick panic path.
+        self._panic_breach_started_at: float | None = None
 
     @property
     def fired(self) -> bool:
@@ -192,6 +198,7 @@ class MomentumSignalStrategy:
         self._erosion_last_log_time = 0.0
         self._erosion_last_logged_val = 0.0
         self._erosion_last_logged_cusum = 0.0
+        self._panic_breach_started_at = None
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -302,28 +309,41 @@ class MomentumSignalStrategy:
             self._erosion_ema = alpha * erosion + (1.0 - alpha) * self._erosion_ema
 
         # --- Path 1: panic exit on catastrophic reversal ---
+        # Panic requires a *sustained* breach of panic_threshold — not a single
+        # tick — so that a short-duration price noise burst cannot short-circuit
+        # the CUSUM path. See 2026-04-12 14:41 Trade #4 false panic.
         panic_threshold = threshold * ecfg.panic_multiplier
+        now_mono = time.monotonic()
         if erosion > panic_threshold:
-            log.warning(
-                "EROSION PANIC: rank=%d erosion=%.4f > panic=%.4f (%.1fx threshold=%.4f) "
-                "fire=%.4f%% current=%.4f%%",
-                self.signal_cfg.rank,
-                erosion,
-                panic_threshold,
-                ecfg.panic_multiplier,
-                threshold,
-                fire_delta,
-                current_pct,
-            )
-            await self._execute_early_exit(
-                erosion,
-                threshold,
-                fire_delta,
-                current_pct,
-                order_mgr,
-                reason="post-fire erosion PANIC — catastrophic reversal",
-            )
-            return
+            if self._panic_breach_started_at is None:
+                self._panic_breach_started_at = now_mono
+            breach_duration = now_mono - self._panic_breach_started_at
+            if breach_duration >= ecfg.panic_min_duration_s:
+                log.warning(
+                    "EROSION PANIC: rank=%d erosion=%.4f > panic=%.4f (%.1fx threshold=%.4f) "
+                    "duration=%.2fs fire=%.4f%% current=%.4f%%",
+                    self.signal_cfg.rank,
+                    erosion,
+                    panic_threshold,
+                    ecfg.panic_multiplier,
+                    threshold,
+                    breach_duration,
+                    fire_delta,
+                    current_pct,
+                )
+                await self._execute_early_exit(
+                    erosion,
+                    threshold,
+                    fire_delta,
+                    current_pct,
+                    order_mgr,
+                    reason="post-fire erosion PANIC — sustained catastrophic reversal",
+                )
+                return
+        else:
+            # Breach cleared — reset the sustained-duration timer so a later
+            # transient re-breach does not inherit an already-expired clock.
+            self._panic_breach_started_at = None
 
         # --- Path 2: CUSUM accumulation ---
         excess = max(0.0, self._erosion_ema - threshold - ecfg.cusum_tolerance)
@@ -678,7 +698,20 @@ class MomentumSignalStrategy:
             # Haven't entered the observation window yet
             return
 
-        # time_remaining < observe_to_s — observation window has elapsed
+        # Narrow-window grace: keep accumulating for a few seconds past
+        # observe_to_s so a signal whose delta crossed the threshold just
+        # after window close still gets a chance to fire.
+        window_span = sc.observe_from_s - sc.observe_to_s
+        if (
+            self.cfg.post_observe_grace_s > 0.0
+            and window_span < self.cfg.narrow_observe_window_threshold_s
+        ):
+            grace_floor = sc.observe_to_s - self.cfg.post_observe_grace_s
+            if time_remaining >= grace_floor:
+                self._accumulate(bn_dir_pct, time_remaining, signal.binance_obi)
+                return
+
+        # Window (+ grace if applicable) has elapsed — evaluate once.
         self._fired = True  # only evaluate once per window
         if self._n < 5:
             log.info(

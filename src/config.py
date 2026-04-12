@@ -52,6 +52,12 @@ rules_strategy:
   # cells get rejected live that would have passed historically. 0 disables
   # subsampling (accept every strategy tick).
   variance_subsample_interval_s: 1.0
+  # Post-window grace for narrow observation windows. Signals whose window
+  # span is < narrow_observe_window_threshold_s are re-evaluated up to
+  # post_observe_grace_s after window close, so that price movement barely
+  # missing the window (e.g. delta crossing threshold ~5s late) still fires.
+  narrow_observe_window_threshold_s: 60.0
+  post_observe_grace_s: 10.0
 
 # ---------------------------------------------------------------------------
 # Risk management
@@ -152,7 +158,8 @@ erosion:
   cusum_tolerance: 0.05          # ignore exceedances < 5% above threshold
   cusum_limit: 0.80              # cumulative excess needed to trigger exit
   cusum_decay: 0.95              # CUSUM bleed-off rate when erosion dips below threshold
-  panic_multiplier: 1.50         # immediate exit if erosion > 1.5x threshold
+  panic_multiplier: 2.20         # panic only on genuine catastrophic reversal
+  panic_min_duration_s: 3.0      # breach must persist N seconds before panic fires
 """
 
 
@@ -186,6 +193,14 @@ class RulesStrategyConfig:
     # bot cannot read this from the collector config because it runs on a
     # separate VPS, so it's set here explicitly. 0 disables subsampling.
     variance_subsample_interval_s: float = 1.0
+    # Narrow-window grace: signals with (observe_from_s - observe_to_s) <
+    # narrow_observe_window_threshold_s get an extra grace period after the
+    # observation window closes before being evaluated. Motivated by the
+    # 2026-04-12 16:05 UP signal (window [200,160], delta crossed threshold
+    # ~5s post-window close and was missed). Grace only fires if the window
+    # was narrow; wide windows evaluate at close as before.
+    narrow_observe_window_threshold_s: float = 60.0
+    post_observe_grace_s: float = 10.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,7 +297,8 @@ class ErosionConfig:
     cusum_tolerance: float = 0.05
     cusum_limit: float = 0.80
     cusum_decay: float = 0.95
-    panic_multiplier: float = 1.50
+    panic_multiplier: float = 2.20
+    panic_min_duration_s: float = 3.0
 
 
 @dataclass(frozen=True, slots=True)

@@ -861,7 +861,29 @@ class MomentumSignalStrategy:
         )
 
         # --- Maker-first entry ---
-        maker_timeout = self.cfg.maker_timeout_s
+        # Ultra-high-confidence fast path: cross the spread on fire instead
+        # of resting a maker. On strong, tight signals the ask can walk away
+        # within the maker timeout and turn a correct prediction into a
+        # TAKER_NO_EDGE_AT_NEW_PRICE no-fill; paying ~1¢ on entry is cheap
+        # insurance against that. Gated by oos_wr and (optionally) stddev;
+        # setting either threshold to 0 disables that gate.
+        skip_maker = (
+            self.cfg.skip_maker_min_oos_wr_pct > 0.0
+            and sc.oos_win_rate_pct >= self.cfg.skip_maker_min_oos_wr_pct
+            and (
+                self.cfg.skip_maker_max_stddev_pct <= 0.0
+                or stddev <= self.cfg.skip_maker_max_stddev_pct
+            )
+        )
+        if skip_maker:
+            log.info(
+                "SKIP_MAKER (high conf) rank=%d oos_wr=%.1f%% stddev=%.4f%% \u2192 cross on fire",
+                sc.rank,
+                sc.oos_win_rate_pct,
+                stddev,
+            )
+
+        maker_timeout = 0.0 if skip_maker else self.cfg.maker_timeout_s
         if maker_timeout > 0:
             maker_price = round(best_ask - 0.01, 2)
             if maker_price <= 0:

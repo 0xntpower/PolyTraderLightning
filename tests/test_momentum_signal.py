@@ -404,6 +404,155 @@ class TestEvaluate:
 
 
 # ---------------------------------------------------------------------------
+# Skip-maker high-confidence fast path tests
+# ---------------------------------------------------------------------------
+
+
+def _prime_strategy_for_fire(strategy: MomentumSignalStrategy) -> None:
+    """Wire Kelly context + bankroll so a fire can actually size a bet."""
+    strategy.kelly_wr_result = AdjustedWinRateResult(
+        adjusted_p=0.88,
+        vol_discount=0,
+        chop_discount=0,
+        outcome_discount=0,
+        total_discount=0,
+        feedback_adjustment=0,
+        regime_ready=True,
+    )
+    strategy.sizing_cfg = SizingConfig()
+    strategy.erosion_cfg = ErosionConfig()
+    strategy.bankroll = 1000.0
+
+
+async def _run_fire(
+    strategy: MomentumSignalStrategy,
+    executor: FakeOrderExecutor,
+    *,
+    bn_pct: float = 0.001,
+) -> None:
+    """Accumulate 10 samples inside the observation window, then fire."""
+    for i in range(10):
+        sig = _make_signal(bn_direction_from_open_pct=bn_pct)
+        await strategy.evaluate(sig, 220.0 - i * 4, executor)
+    sig = _make_signal(bn_direction_from_open_pct=bn_pct)
+    await strategy.evaluate(sig, 170.0, executor)
+
+
+def _build_strategy_skip_maker(
+    *,
+    skip_maker_min_oos_wr_pct: float,
+    skip_maker_max_stddev_pct: float,
+    oos_win_rate_pct: float = 90.0,
+    max_variance_pct: float = 1.0,
+) -> tuple[MomentumSignalStrategy, FakeOrderExecutor]:
+    cfg = make_rules_config(
+        skip_maker_min_oos_wr_pct=skip_maker_min_oos_wr_pct,
+        skip_maker_max_stddev_pct=skip_maker_max_stddev_pct,
+    )
+    state = make_market_state()
+    sc = make_signal_config(
+        side=Direction.UP,
+        observe_from_s=240.0,
+        observe_to_s=180.0,
+        min_delta_pct=0.05,
+        max_variance_pct=max_variance_pct,
+        oos_win_rate_pct=oos_win_rate_pct,
+    )
+    strategy = MomentumSignalStrategy(cfg, state, sc)
+    executor = FakeOrderExecutor()
+    _prime_strategy_for_fire(strategy)
+    return strategy, executor
+
+
+class TestSkipMakerHighConfidence:
+    """Cross-spread-on-fire path for ultra-high-confidence signals.
+
+    With `skip_maker_min_oos_wr_pct > 0`, fires whose `oos_win_rate_pct`
+    clears the threshold (and whose realised stddev clears the optional
+    stddev gate) should bypass the maker quote and go straight to taker.
+    """
+
+    @pytest.mark.asyncio
+    async def test_skip_maker_when_both_gates_pass(self):
+        strategy, executor = _build_strategy_skip_maker(
+            skip_maker_min_oos_wr_pct=96.0,
+            skip_maker_max_stddev_pct=0.035,
+            oos_win_rate_pct=97.0,
+        )
+        await _run_fire(strategy, executor)
+
+        assert strategy._fired
+        assert len(executor.calls) == 1
+        assert executor.calls[0].method == "place_taker_order"
+
+    @pytest.mark.asyncio
+    async def test_keep_maker_when_oos_wr_below_threshold(self):
+        strategy, executor = _build_strategy_skip_maker(
+            skip_maker_min_oos_wr_pct=96.0,
+            skip_maker_max_stddev_pct=0.035,
+            oos_win_rate_pct=95.0,  # below gate
+        )
+        await _run_fire(strategy, executor)
+
+        assert strategy._fired
+        assert len(executor.calls) == 1
+        assert executor.calls[0].method == "place_maker_order"
+
+    @pytest.mark.asyncio
+    async def test_keep_maker_when_stddev_above_gate(self):
+        strategy, executor = _build_strategy_skip_maker(
+            skip_maker_min_oos_wr_pct=96.0,
+            skip_maker_max_stddev_pct=0.01,  # very tight gate
+            oos_win_rate_pct=99.0,
+        )
+        # Samples vary enough that population stddev exceeds 0.01
+        for i in range(10):
+            val = 0.002 if i % 2 == 0 else 0.0005
+            sig = _make_signal(bn_direction_from_open_pct=val)
+            await strategy.evaluate(sig, 220.0 - i * 4, executor)
+        sig = _make_signal(bn_direction_from_open_pct=0.002)
+        await strategy.evaluate(sig, 170.0, executor)
+
+        assert strategy._fired
+        assert len(executor.calls) == 1
+        assert executor.calls[0].method == "place_maker_order"
+
+    @pytest.mark.asyncio
+    async def test_disabled_when_min_oos_is_zero(self):
+        """Setting `skip_maker_min_oos_wr_pct=0` fully disables the fast path."""
+        strategy, executor = _build_strategy_skip_maker(
+            skip_maker_min_oos_wr_pct=0.0,
+            skip_maker_max_stddev_pct=0.035,
+            oos_win_rate_pct=100.0,  # would otherwise trip the gate
+        )
+        await _run_fire(strategy, executor)
+
+        assert strategy._fired
+        assert len(executor.calls) == 1
+        assert executor.calls[0].method == "place_maker_order"
+
+    @pytest.mark.asyncio
+    async def test_stddev_gate_disabled_with_zero(self):
+        """`skip_maker_max_stddev_pct=0` means 'no stddev gate' — oos_wr alone decides."""
+        strategy, executor = _build_strategy_skip_maker(
+            skip_maker_min_oos_wr_pct=96.0,
+            skip_maker_max_stddev_pct=0.0,
+            oos_win_rate_pct=97.0,
+        )
+        # Noisy samples — stddev would fail a tight gate, but the gate is off
+        for i in range(10):
+            val = 0.005 if i % 2 == 0 else 0.0005
+            sig = _make_signal(bn_direction_from_open_pct=val)
+            await strategy.evaluate(sig, 220.0 - i * 4, executor)
+        sig = _make_signal(bn_direction_from_open_pct=0.005)
+        await strategy.evaluate(sig, 170.0, executor)
+
+        assert strategy._fired
+        assert len(executor.calls) == 1
+        assert executor.calls[0].method == "place_taker_order"
+
+
+# ---------------------------------------------------------------------------
 # Maker monitoring tests
 # ---------------------------------------------------------------------------
 

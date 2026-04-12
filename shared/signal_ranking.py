@@ -55,9 +55,7 @@ def calculate_smart_score(signal: dict[str, Any]) -> float:
     first_test_fold = 2  # must match core::kWalkForwardMinTrainFolds
     max_fold_weight_sum = total_folds * (total_folds + 1) / 2.0
     fold_indices = signal.get("wfFoldIndices", [])
-    fold_weight_sum = sum(
-        (idx - first_test_fold) + 1.0 for idx in fold_indices
-    )
+    fold_weight_sum = sum((idx - first_test_fold) + 1.0 for idx in fold_indices)
     fold_strength = fold_weight_sum / max_fold_weight_sum if max_fold_weight_sum > 0 else 0.0
 
     stat_strength = min_win_rate * fold_strength * confidence

@@ -24,6 +24,7 @@ from strategy.window_tracker import WINDOW_DURATION, WindowTracker
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_events_response(price_to_beat: float | str | None) -> list[dict]:
     """Build a Gamma /events?metadata=true response with priceToBeat."""
     metadata: dict = {}

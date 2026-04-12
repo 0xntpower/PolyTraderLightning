@@ -164,12 +164,19 @@ from config import (
 
 
 def make_rules_config(**overrides) -> RulesStrategyConfig:
-    """Create a RulesStrategyConfig with test defaults."""
+    """Create a RulesStrategyConfig with test defaults.
+
+    Skip-maker fast path is off by default here so tests that exercise the
+    maker path remain deterministic regardless of the signal's oos_wr.
+    Tests for the skip-maker path turn it on explicitly.
+    """
     defaults = {
         "enabled": True,
         "entry_window_stop": 5,
         "min_win_rate": 0.50,
         "maker_timeout_s": 20.0,
+        "skip_maker_min_oos_wr_pct": 0.0,
+        "skip_maker_max_stddev_pct": 0.0,
     }
     defaults.update(overrides)
     return RulesStrategyConfig(**defaults)

@@ -38,9 +38,11 @@ rules_strategy:
   max_position_usd: 10.0    # Max USDC to risk per window
   entry_window_stop: 5      # Stop entering within N seconds of close
   min_win_rate: 0.50         # Reject signals below this OOS win rate (fraction)
-  maker_timeout_s: 5.0       # Maker order timeout before taker fallback (0=taker only)
+  maker_timeout_s: 3.0       # Maker order timeout before taker fallback (0=taker only)
   max_chop_flips: 0          # Skip trade if avg chop flips >= this (0=disabled)
   max_entry_gap_pct: 20.0    # Skip if bid >N% below signal avg_entry (0=disabled)
+  skip_maker_min_oos_wr_pct: 96.0   # Cross spread on fire when oos_wr >= this (0=disabled)
+  skip_maker_max_stddev_pct: 0.035  # AND-gate: also require stddev <= this (0=no stddev gate)
 
 # ---------------------------------------------------------------------------
 # Risk management
@@ -159,9 +161,15 @@ class RulesStrategyConfig:
     max_position_usd: float = 10.0
     entry_window_stop: int = 5
     min_win_rate: float = 0.50
-    maker_timeout_s: float = 5.0
+    maker_timeout_s: float = 3.0
     max_chop_flips: int = 0  # skip if avg chop flips >= this (0=disabled)
     max_entry_gap_pct: float = 20.0  # skip if bid >N% below avg_entry (0=disabled)
+    # High-confidence fast path: when oos_wr is high enough (and optionally
+    # stddev is low enough), skip the maker quote and cross the spread on
+    # fire. Prevents ask walk-away from turning correct predictions into
+    # no-fills via TAKER_NO_EDGE_AT_NEW_PRICE. 0 disables either gate.
+    skip_maker_min_oos_wr_pct: float = 96.0
+    skip_maker_max_stddev_pct: float = 0.035
 
 
 @dataclass(frozen=True, slots=True)

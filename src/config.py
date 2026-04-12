@@ -43,6 +43,15 @@ rules_strategy:
   max_entry_gap_pct: 20.0    # Skip if bid >N% below signal avg_entry (0=disabled)
   skip_maker_min_oos_wr_pct: 96.0   # Cross spread on fire when oos_wr >= this (0=disabled)
   skip_maker_max_stddev_pct: 0.035  # AND-gate: also require stddev <= this (0=no stddev gate)
+  # Subsample the variance accumulator to this cadence (seconds) so the bot's
+  # live stddev lines up with the engine's historical backtest values. Must
+  # match PolyDataCollector's snapshot_interval_s — the engine's max_variance
+  # thresholds were measured on data sampled at that rate, and the bot sees
+  # Binance updates faster than the collector records them. Without this,
+  # live stddev runs systematically higher than the backtest and marginal
+  # cells get rejected live that would have passed historically. 0 disables
+  # subsampling (accept every strategy tick).
+  variance_subsample_interval_s: 1.0
 
 # ---------------------------------------------------------------------------
 # Risk management
@@ -170,6 +179,13 @@ class RulesStrategyConfig:
     # no-fills via TAKER_NO_EDGE_AT_NEW_PRICE. 0 disables either gate.
     skip_maker_min_oos_wr_pct: float = 96.0
     skip_maker_max_stddev_pct: float = 0.035
+    # Subsample the live variance accumulator to this cadence (seconds) so the
+    # bot's stddev matches the engine's backtest values. Must match
+    # PolyDataCollector's snapshot_interval_s on the lab machine — the engine's
+    # max_variance thresholds were measured on data sampled at that rate. The
+    # bot cannot read this from the collector config because it runs on a
+    # separate VPS, so it's set here explicitly. 0 disables subsampling.
+    variance_subsample_interval_s: float = 1.0
 
 
 @dataclass(frozen=True, slots=True)

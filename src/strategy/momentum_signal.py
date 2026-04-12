@@ -124,6 +124,12 @@ class MomentumSignalStrategy:
         self._n: int = 0
         self._mean: float = 0.0
         self._m2: float = 0.0
+        # Subsample state: throttle variance sampling to cfg.variance_subsample_interval_s
+        # so live stddev matches the engine's backtest cadence. time_remaining
+        # decreases as the window progresses, so we sample when the elapsed
+        # drop since the last sample is >= the configured interval.
+        self._last_var_sample_t: float = 0.0
+        self._var_sampled_once: bool = False
         # Latest value at the lowest time_remaining seen within the window
         self._latest_pct: float = 0.0
         self._latest_obi: float = 0.0
@@ -163,6 +169,8 @@ class MomentumSignalStrategy:
         self._n = 0
         self._mean = 0.0
         self._m2 = 0.0
+        self._last_var_sample_t = 0.0
+        self._var_sampled_once = False
         self._latest_pct = 0.0
         self._latest_obi = 0.0
         self._lowest_t = self.signal_cfg.observe_from_s
@@ -190,11 +198,28 @@ class MomentumSignalStrategy:
     # ------------------------------------------------------------------
 
     def _accumulate(self, bn_dir_pct: float, time_remaining: float, obi: float) -> None:
-        """Add one sample (in percent) using Welford's online algorithm."""
-        self._n += 1
-        delta = bn_dir_pct - self._mean
-        self._mean += delta / self._n
-        self._m2 += delta * (bn_dir_pct - self._mean)
+        """Add one sample (in percent) using Welford's online algorithm.
+
+        The variance accumulator is subsampled to cfg.variance_subsample_interval_s
+        so the bot's live stddev matches the engine's historical cadence
+        (collector snapshot_interval_s). Latest-value tracking is NOT subsampled
+        — we always want the freshest delta/OBI at the end of the window.
+        """
+        interval = self.cfg.variance_subsample_interval_s
+        # time_remaining decreases over the window; sample when the drop since
+        # the last accepted sample is >= the configured interval (or on the
+        # very first call so the accumulator has a seed).
+        if (
+            interval <= 0.0
+            or not self._var_sampled_once
+            or (self._last_var_sample_t - time_remaining) >= interval
+        ):
+            self._n += 1
+            delta = bn_dir_pct - self._mean
+            self._mean += delta / self._n
+            self._m2 += delta * (bn_dir_pct - self._mean)
+            self._last_var_sample_t = time_remaining
+            self._var_sampled_once = True
 
         if time_remaining <= self._lowest_t:
             self._lowest_t = time_remaining

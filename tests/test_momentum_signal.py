@@ -148,8 +148,10 @@ class TestConditionsMet:
         strategy, _ = _make_strategy()
         # Known values: [2, 4, 4, 4, 5, 5, 7, 9]
         # Population stddev = sqrt(32/8) = 2.0
-        for v in [2, 4, 4, 4, 5, 5, 7, 9]:
-            strategy._accumulate(float(v), 200.0, 0.0)
+        # time_remaining decreases by 1.0s per call so each sample passes the
+        # default variance_subsample_interval_s=1.0 gate.
+        for i, v in enumerate([2, 4, 4, 4, 5, 5, 7, 9]):
+            strategy._accumulate(float(v), 200.0 - i, 0.0)
         assert strategy._population_stddev() == pytest.approx(2.0, abs=0.01)
 
 

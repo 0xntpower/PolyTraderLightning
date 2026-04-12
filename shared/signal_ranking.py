@@ -16,12 +16,15 @@ _MAX_CONFIDENCE = 10.0
 
 # Any: engine JSON with many optional fields, schema defined externally
 def calculate_smart_score(signal: dict[str, Any]) -> float:
-    """Composite score: EV * sqrt(minFoldWR * foldStrength * confidence) * sampleDepth * 100.
+    """Composite score: EV * sqrt(minFoldWR * confidence) * foldStrength * sampleDepth * 100.
 
-    Mirrors the engine's composite score in CrossFoldAggregationStage.
-    If the engine already computed ``compositeScore`` it should be preferred;
-    this function exists for standalone tools that rank engine JSON without
-    re-running the engine.
+    Mirrors the engine's composite score in CrossFoldAggregationStage:
+    ``statStrength`` (= minFoldWR * confidence) is dampened under a sqrt,
+    while ``foldStrength`` is applied linearly outside the sqrt so that
+    fold count and recency carry real weight in ranking. If the engine
+    already computed ``compositeScore`` it should be preferred; this
+    function exists for standalone tools (e.g. ``psl rank-signals``) that
+    rank engine JSON without re-running the engine.
 
     Returns 0 for signals with < 2 folds, no OOS matches, weak p-values,
     or non-positive EV.
@@ -58,10 +61,13 @@ def calculate_smart_score(signal: dict[str, Any]) -> float:
     fold_weight_sum = sum((idx - first_test_fold) + 1.0 for idx in fold_indices)
     fold_strength = fold_weight_sum / max_fold_weight_sum if max_fold_weight_sum > 0 else 0.0
 
-    stat_strength = min_win_rate * fold_strength * confidence
+    # Matches C++ CrossFoldAggregationStage: statStrength is minFoldWR *
+    # confidence under sqrt (statistical-quality dampener), foldStrength is
+    # applied linearly outside so recency/fold-count drive ranking.
+    stat_strength = min_win_rate * confidence
     sample_depth = min(oos_matches / 20.0, 1.0)
 
-    score = ev * math.sqrt(stat_strength) * sample_depth * 100
+    score = ev * math.sqrt(stat_strength) * fold_strength * sample_depth * 100
     return float(round(score, 2))
 
 

@@ -555,6 +555,80 @@ class TestSkipMakerHighConfidence:
 
 
 # ---------------------------------------------------------------------------
+# v2.9 entry-price cap tests
+# ---------------------------------------------------------------------------
+
+
+class TestEntryPriceCap:
+    """v2.9 hard entry-price cap — refuse fills at best_ask >= cap.
+
+    Guards against the v2.8 calibration gap where engine conservative WR
+    overstated realized WR by ~16 pp, so entries at $0.78+ produced
+    negative EV despite passing every other gate.
+    """
+
+    @staticmethod
+    def _build(
+        *,
+        max_entry_price: float,
+        best_ask_up: float = 0.85,
+    ) -> tuple[MomentumSignalStrategy, FakeOrderExecutor]:
+        cfg = make_rules_config(max_entry_price=max_entry_price)
+        state = make_market_state(best_ask_up=best_ask_up)
+        sc = make_signal_config(
+            side=Direction.UP,
+            observe_from_s=240.0,
+            observe_to_s=180.0,
+            min_delta_pct=0.05,
+            max_variance_pct=1.0,
+        )
+        strategy = MomentumSignalStrategy(cfg, state, sc)
+        executor = FakeOrderExecutor()
+        _prime_strategy_for_fire(strategy)
+        return strategy, executor
+
+    @pytest.mark.asyncio
+    async def test_cap_blocks_when_ask_at_or_above(self):
+        """ask=0.85 vs cap=0.78 → SKIP with no orders placed."""
+        strategy, executor = self._build(max_entry_price=0.78, best_ask_up=0.85)
+        await _run_fire(strategy, executor)
+
+        assert strategy._fired  # conditions met
+        assert len(executor.calls) == 0  # but cap blocked the fill
+
+    @pytest.mark.asyncio
+    async def test_cap_allows_when_ask_below(self):
+        """ask=0.75 vs cap=0.78 → trade proceeds."""
+        strategy, executor = self._build(max_entry_price=0.78, best_ask_up=0.75)
+        await _run_fire(strategy, executor)
+
+        assert strategy._fired
+        assert len(executor.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_cap_disabled_with_zero(self):
+        """max_entry_price=0.0 disables the gate entirely.
+
+        Ask is 0.85 — above the default cap of 0.78 but still within Kelly
+        edge at p=0.88. With the cap off, the trade must proceed.
+        """
+        strategy, executor = self._build(max_entry_price=0.0, best_ask_up=0.85)
+        await _run_fire(strategy, executor)
+
+        assert strategy._fired
+        assert len(executor.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_cap_boundary_equal_is_blocked(self):
+        """ask exactly equal to cap is blocked (>= comparison)."""
+        strategy, executor = self._build(max_entry_price=0.80, best_ask_up=0.80)
+        await _run_fire(strategy, executor)
+
+        assert strategy._fired
+        assert len(executor.calls) == 0
+
+
+# ---------------------------------------------------------------------------
 # Maker monitoring tests
 # ---------------------------------------------------------------------------
 

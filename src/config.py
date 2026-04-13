@@ -35,12 +35,12 @@ mode:
 # ---------------------------------------------------------------------------
 rules_strategy:
   enabled: true
-  max_position_usd: 10.0    # Max USDC to risk per window
+  max_position_usd: 75.0    # Max USDC to risk per window
   entry_window_stop: 5      # Stop entering within N seconds of close
   min_win_rate: 0.50         # Reject signals below this OOS win rate (fraction)
   maker_timeout_s: 3.0       # Maker order timeout before taker fallback (0=taker only)
   max_chop_flips: 0          # Skip trade if avg chop flips >= this (0=disabled)
-  max_entry_gap_pct: 20.0    # Skip if bid >N% below signal avg_entry (0=disabled)
+  max_entry_gap_pct: 15.0    # Skip if bid >N% below signal avg_entry (0=disabled)
   skip_maker_min_oos_wr_pct: 96.0   # Cross spread on fire when oos_wr >= this (0=disabled)
   skip_maker_max_stddev_pct: 0.035  # AND-gate: also require stddev <= this (0=no stddev gate)
   # Subsample the variance accumulator to this cadence (seconds) so the bot's
@@ -58,6 +58,10 @@ rules_strategy:
   # missing the window (e.g. delta crossing threshold ~5s late) still fires.
   narrow_observe_window_threshold_s: 60.0
   post_observe_grace_s: 10.0
+  # v2.9 entry-price cap: refuse fills at best_ask >= this. Guards against
+  # the engine's realized-vs-conservative WR calibration gap (16 pp in v2.8).
+  # 0 disables. Set to 0.78 so break-even math holds at realized WR ~74%.
+  max_entry_price: 0.78
 
 # ---------------------------------------------------------------------------
 # Risk management
@@ -103,6 +107,8 @@ ipc:
   port: 19731
   stale_signal_warning_hours: 6
   visualizer_enabled: true
+  visualizer_host: "127.0.0.1"
+  visualizer_port: 19732
 
 # ---------------------------------------------------------------------------
 # Signal lifecycle - signal health, decay, and age scaling
@@ -142,7 +148,7 @@ regime:
   vol_high_pct: 0.30             # high vol (stddev) - full severity
   vol_min_samples: 6             # min returns before vol scaling is active
   chop_lookback_windows: 6       # ~30 min of recent windows
-  chop_normal_flips: 3.0         # normal direction flips per window
+  chop_normal_flips: 5.0         # normal direction flips per window
   chop_high_flips: 10.0          # high chop - full severity
   chop_min_samples: 3            # min windows before chop scaling is active
   outcome_lookback_windows: 6    # rolling window of recent outcomes
@@ -160,6 +166,8 @@ erosion:
   cusum_decay: 0.95              # CUSUM bleed-off rate when erosion dips below threshold
   panic_multiplier: 2.20         # panic only on genuine catastrophic reversal
   panic_min_duration_s: 3.0      # breach must persist N seconds before panic fires
+  cusum_sustain_s: 4.0           # v2.9: CUSUM breach must persist N seconds before exit
+  cusum_suppress_top_bid: 0.85   # v2.9: suppress CUSUM exit if our side's top bid >= this
 """
 
 
@@ -174,12 +182,12 @@ class ModeConfig:
 @dataclass(frozen=True, slots=True)
 class RulesStrategyConfig:
     enabled: bool = True
-    max_position_usd: float = 10.0
+    max_position_usd: float = 75.0
     entry_window_stop: int = 5
     min_win_rate: float = 0.50
     maker_timeout_s: float = 3.0
     max_chop_flips: int = 0  # skip if avg chop flips >= this (0=disabled)
-    max_entry_gap_pct: float = 20.0  # skip if bid >N% below avg_entry (0=disabled)
+    max_entry_gap_pct: float = 15.0  # skip if bid >N% below avg_entry (0=disabled)
     # High-confidence fast path: when oos_wr is high enough (and optionally
     # stddev is low enough), skip the maker quote and cross the spread on
     # fire. Prevents ask walk-away from turning correct predictions into
@@ -201,6 +209,13 @@ class RulesStrategyConfig:
     # was narrow; wide windows evaluate at close as before.
     narrow_observe_window_threshold_s: float = 60.0
     post_observe_grace_s: float = 10.0
+    # v2.9 entry-price cap. v2.8 realized directional accuracy was 74% vs the
+    # engine's ~90% conservative WR — a 16 pp calibration gap that blew past
+    # the break-even WR at the $0.78-$0.82 entries the bot was actually taking
+    # (break-even at ask=0.80 is WR=80%). Refuse any fill whose best_ask is
+    # >= this cap, giving a buffer against the calibration overstatement.
+    # 0 disables the gate.
+    max_entry_price: float = 0.78
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,11 +255,13 @@ class PaperConfig:
 
 @dataclass(frozen=True, slots=True)
 class IpcConfig:
+    # Defaults match the VPS Tailscale setup so a fresh config.yml on the
+    # VPS works without manual edits. Override for other machines.
     host: str = "127.0.0.1"
     port: int = 19731
     stale_signal_warning_hours: float = 6.0
     visualizer_enabled: bool = True
-    visualizer_host: str = "0.0.0.0"  # noqa: S104  # nosec B104  # intentional: Tailscale
+    visualizer_host: str = "127.0.0.1"
     visualizer_port: int = 19732
 
 
@@ -282,7 +299,7 @@ class RegimeConfig:
     vol_high_pct: float = 0.30
     vol_min_samples: int = 6
     chop_lookback_windows: int = 6
-    chop_normal_flips: float = 3.0
+    chop_normal_flips: float = 5.0
     chop_high_flips: float = 10.0
     chop_min_samples: int = 3
     outcome_lookback_windows: int = 6
@@ -299,6 +316,18 @@ class ErosionConfig:
     cusum_decay: float = 0.95
     panic_multiplier: float = 2.20
     panic_min_duration_s: float = 3.0
+    # v2.9 CUSUM sustain gate: the CUSUM exit must stay above limit for at
+    # least this many seconds before firing. v2.8 had 9 CUSUM exits of which
+    # 2 were hard false (market bid_up ≥ 0.96 at close) + 1 partial (Trade
+    # 19 sold at profit while bid_up=0.99). A sustain gate filters single-
+    # tick CUSUM blips. 0 disables the gate (legacy single-tick behavior).
+    cusum_sustain_s: float = 4.0
+    # v2.9 price-aware CUSUM suppression: if the Polymarket top bid on our
+    # position's side is >= this threshold, the orderbook is telling us we
+    # are right regardless of BTC delta wiggles, so the CUSUM exit is
+    # suppressed. Trade 19 in v2.8 exited via CUSUM while bid_up was 0.99.
+    # 0 disables the suppression (exit regardless of orderbook).
+    cusum_suppress_top_bid: float = 0.85
 
 
 @dataclass(frozen=True, slots=True)

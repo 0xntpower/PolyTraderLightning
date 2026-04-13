@@ -532,6 +532,20 @@ class WindowEventHandler:
                 if _kelly_entry > 0 and _kelly_size > 0:
                     self._bankroll_tracker.update_loss(_kelly_size, _kelly_entry, fee=_kelly_fee)
 
+            # v2.9 Kelly/paper bankroll reconcile. In paper mode the
+            # authoritative balance is PaperOrderManager._balance, which is
+            # updated by the simulator using actual (sell_price - entry_price)
+            # proceeds including CUSUM early-exit PnL. The Kelly
+            # update_win/update_loss path only knows about size/entry and
+            # ignores early-exit sell prices, so the two drift — v2.8 paper
+            # ended at $872 while Kelly bankroll ended at $515, causing
+            # Kelly to size off a stale, pessimistic base. Reconcile after
+            # every settled paper trade so Kelly sizes from the real balance.
+            from execution.paper_trading import PaperOrderManager
+
+            if isinstance(order_mgr, PaperOrderManager):
+                self._bankroll_tracker.sync_from_api(order_mgr.balance)
+
         # SPRT decay detection
         if (
             filled

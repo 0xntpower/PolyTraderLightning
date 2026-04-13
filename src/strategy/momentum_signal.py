@@ -159,6 +159,12 @@ class MomentumSignalStrategy:
         # a brief noise blip on 2026-04-12 14:41 turned a winning trade
         # into a -$20 loss under the previous single-tick panic path.
         self._panic_breach_started_at: float | None = None
+        # v2.9: monotonic timestamp when CUSUM first crossed its limit.
+        # Mirrors the panic sustain timer. Prevents single-tick CUSUM blips
+        # from triggering exits — v2.8 had 2 hard-false + 1 partial-false
+        # CUSUM exits out of 9 (33% false rate) that the sustain gate
+        # would have filtered.
+        self._cusum_breach_started_at: float | None = None
 
     @property
     def fired(self) -> bool:
@@ -199,6 +205,7 @@ class MomentumSignalStrategy:
         self._erosion_last_logged_val = 0.0
         self._erosion_last_logged_cusum = 0.0
         self._panic_breach_started_at = None
+        self._cusum_breach_started_at = None
 
     # ------------------------------------------------------------------
     # Private helpers
@@ -277,11 +284,15 @@ class MomentumSignalStrategy:
         0 means no erosion, 1 means fully reversed to open.
 
         Three exit paths:
-        1. PANIC - raw erosion exceeds panic_multiplier * threshold.
-           Catastrophic reversal, exit immediately.
+        1. PANIC - raw erosion exceeds panic_multiplier * threshold,
+           sustained for panic_min_duration_s. Catastrophic reversal.
         2. CUSUM - EMA-smoothed erosion accumulates excess above threshold.
-           When cumulative excess reaches the limit, exit. Automatically
-           adapts: large breaches trigger in ~1s, marginal ones need ~4s.
+           When cumulative excess reaches the limit AND the breach has
+           persisted for cusum_sustain_s (v2.9 sustain gate), exit. If the
+           Polymarket top bid on our side is already >= cusum_suppress_top_bid
+           (v2.9 price-aware suppression), the orderbook disagrees with the
+           BTC delta signal and the exit is suppressed — the market is
+           telling us we are right.
         3. Sub-threshold - CUSUM bleeds off via decay factor, preventing
            false triggers from brief spikes that recover.
         """
@@ -354,17 +365,64 @@ class MomentumSignalStrategy:
             self._erosion_cusum *= ecfg.cusum_decay
 
         if self._erosion_cusum >= ecfg.cusum_limit:
+            # v2.9 sustain gate: require the CUSUM breach to persist for
+            # cusum_sustain_s before firing. Single-tick CUSUM breaches in
+            # v2.8 produced 2 hard + 1 partial false exits out of 9 (33%).
+            if self._cusum_breach_started_at is None:
+                self._cusum_breach_started_at = now_mono
+            cusum_breach_duration = now_mono - self._cusum_breach_started_at
+            if ecfg.cusum_sustain_s > 0.0 and cusum_breach_duration < ecfg.cusum_sustain_s:
+                log.info(
+                    "EROSION CUSUM BREACH (not yet sustained): rank=%d cusum=%.3f "
+                    "limit=%.3f duration=%.2fs need=%.1fs",
+                    self.signal_cfg.rank,
+                    self._erosion_cusum,
+                    ecfg.cusum_limit,
+                    cusum_breach_duration,
+                    ecfg.cusum_sustain_s,
+                )
+                return
+
+            # v2.9 price-aware suppression: if the Polymarket top bid on our
+            # position's side already reflects a winning outcome, suppress
+            # the CUSUM exit regardless of BTC delta erosion. v2.8 Trade 19
+            # exited via CUSUM while bid_up=0.99; the orderbook was telling
+            # us we were right and the BTC wobble was noise.
+            sc = self.signal_cfg
+            our_top_bid = (
+                self.state.best_bid_up if sc.side == Direction.UP else self.state.best_bid_down
+            )
+            if (
+                ecfg.cusum_suppress_top_bid > 0.0
+                and our_top_bid > 0.0
+                and our_top_bid >= ecfg.cusum_suppress_top_bid
+            ):
+                log.info(
+                    "EROSION CUSUM SUPPRESSED (market agrees): rank=%d side=%s "
+                    "top_bid=%.3f >= suppress=%.3f cusum=%.3f erosion=%.4f",
+                    sc.rank,
+                    sc.side.value,
+                    our_top_bid,
+                    ecfg.cusum_suppress_top_bid,
+                    self._erosion_cusum,
+                    erosion,
+                )
+                return
+
             log.info(
                 "EROSION CUSUM TRIGGERED: rank=%d cusum=%.3f >= limit=%.3f "
-                "ema=%.4f erosion=%.4f threshold=%.4f fire=%.4f%% current=%.4f%%",
+                "sustained=%.2fs ema=%.4f erosion=%.4f threshold=%.4f "
+                "fire=%.4f%% current=%.4f%% top_bid=%.3f",
                 self.signal_cfg.rank,
                 self._erosion_cusum,
                 ecfg.cusum_limit,
+                cusum_breach_duration,
                 self._erosion_ema,
                 erosion,
                 threshold,
                 fire_delta,
                 current_pct,
+                our_top_bid,
             )
             await self._execute_early_exit(
                 erosion,
@@ -375,6 +433,10 @@ class MomentumSignalStrategy:
                 reason="post-fire erosion exceeded safe threshold (sustained)",
             )
             return
+
+        # CUSUM below limit — reset the sustain timer so a later re-breach
+        # doesn't inherit an already-expired clock.
+        self._cusum_breach_started_at = None
 
         # --- Below threshold or accumulating (throttled: 10s interval or meaningful change) ---
         now = time.monotonic()
@@ -771,6 +833,21 @@ class MomentumSignalStrategy:
             return
 
         entry_price = best_ask
+
+        # v2.9 hard entry-price cap. v2.8 lost -$56 with realized WR 74% vs
+        # engine-claim ~90% at $0.78-$0.82 entries; break-even at $0.80
+        # needs 80% WR. Refuse fills at or above the cap so we never buy
+        # into negative-EV territory while the engine calibration gap
+        # persists.
+        if self.cfg.max_entry_price > 0.0 and entry_price >= self.cfg.max_entry_price:
+            log.info(
+                "[SKIP] rank=%d side=%s reason=ENTRY_PRICE_CAP ask=%.3f cap=%.3f",
+                sc.rank,
+                sc.side.value,
+                entry_price,
+                self.cfg.max_entry_price,
+            )
+            return
 
         # Market-agreement filter: skip when live price deviates too far from
         # the signal's historical avg_entry_price (market strongly disagrees)

@@ -1,17 +1,26 @@
 """TCP state publisher for the PolyLiveVisualizer.
 
-Runs a background daemon thread that pushes HMAC-SHA256 signed JSON state
-snapshots to connected visualizer clients.
+Publishes HMAC-SHA256 signed JSON state snapshots to connected visualizer
+clients over a framed binary protocol.
 
-Wire protocol:
-  - 4-byte big-endian length header + UTF-8 JSON envelope.
-  - Envelope: ``{"payload": "<canonical json>", "signature": "<hex>"}``.
-  - The signature covers the exact ``payload`` bytes using HMAC-SHA256
-    with the ``PLSLAB_HMAC_KEY`` pre-shared key.
+Wire format (per frame):
+    [4-byte big-endian length][32-byte HMAC-SHA256][UTF-8 JSON payload]
 
-The publisher accepts multiple clients.  Each client receives the latest
-snapshot immediately on connect, then every subsequent snapshot as it is
-published.  Slow/dead clients are dropped silently.
+``length`` covers the HMAC + payload together. The HMAC is computed over
+the raw payload bytes using the ``PLSLAB_HMAC_KEY`` pre-shared key.
+
+Threading model
+---------------
+- ``publish()`` is called from the asyncio strategy loop every tick. It
+  must never block: the strategy tick places orders and we cannot afford
+  a slow TCP client stalling it. ``publish()`` only serializes/frames
+  the snapshot (microseconds) and hands the bytes to a writer thread
+  via a single-slot mailbox — the latest frame replaces any pending one.
+- A dedicated writer thread drains the mailbox and runs ``sendall`` for
+  every connected client. Slow clients stall the writer thread only, not
+  the event loop.
+- A separate accept thread handles new client connections.
+- Dead clients are pruned on send failure.
 """
 
 from __future__ import annotations
@@ -39,21 +48,28 @@ log = logging.getLogger(__name__)
 
 _HEADER_FMT = "!I"
 _HEADER_SIZE = struct.calcsize(_HEADER_FMT)
+_HMAC_DIGEST_SIZE = 32
 _SEND_TIMEOUT = 5.0
-_MAX_PAYLOAD = 128 * 1024  # 128 KB safety cap
+_MAX_PAYLOAD = 128 * 1024  # 128 KB — matches the C++ client cap
+_MAX_FRAME = _HMAC_DIGEST_SIZE + _MAX_PAYLOAD
+_ACCEPT_TIMEOUT = 2.0
+_WRITER_IDLE_TIMEOUT = 1.0
 
 
 class StatePublisher:
     """TCP server that pushes bot state snapshots to visualizer clients.
 
+    Publishing never blocks the caller. ``publish()`` builds a frame in
+    microseconds and hands it to a writer thread through a single-slot
+    mailbox; when the mailbox already holds a frame, the new one replaces
+    it (visualizers only care about the latest state anyway).
+
     Usage::
 
         pub = StatePublisher(host="0.0.0.0", port=19732)
         pub.start()
-        # ... in strategy loop every tick:
-        pub.publish(snapshot_dict)
-        # ... on shutdown:
-        pub.stop()
+        pub.publish(snapshot_dict)  # from the strategy tick
+        pub.stop()                  # on shutdown
     """
 
     def __init__(self, host: str = "0.0.0.0", port: int = 19732) -> None:  # noqa: S104  # nosec B104  # intentional: visualizer connects over Tailscale
@@ -61,12 +77,18 @@ class StatePublisher:
         self._port = port
         self._hmac_key = get_hmac_key()
         self._server_sock: socket.socket | None = None
-        self._thread: threading.Thread | None = None
+        self._accept_thread: threading.Thread | None = None
+        self._writer_thread: threading.Thread | None = None
         self._shutdown = threading.Event()
 
         self._clients_lock = threading.Lock()
         self._clients: list[socket.socket] = []
 
+        # Single-slot frame mailbox: newest wins.
+        self._frame_cond = threading.Condition()
+        self._pending_frame: bytes | None = None
+
+        # Cached last-sent frame for instant hydration of new connections.
         self._snapshot_lock = threading.Lock()
         self._snapshot_bytes: bytes = b""
 
@@ -77,22 +99,35 @@ class StatePublisher:
     def start(self) -> None:
         self._server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self._server_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        self._server_sock.settimeout(2.0)
+        self._server_sock.settimeout(_ACCEPT_TIMEOUT)
         self._server_sock.bind((self._host, self._port))
         self._server_sock.listen(4)
-        self._thread = threading.Thread(
-            target=self._accept_loop, daemon=True, name="state-publisher"
+
+        self._writer_thread = threading.Thread(
+            target=self._writer_loop, daemon=True, name="state-publisher-writer"
         )
-        self._thread.start()
+        self._writer_thread.start()
+
+        self._accept_thread = threading.Thread(
+            target=self._accept_loop, daemon=True, name="state-publisher-accept"
+        )
+        self._accept_thread.start()
+
         log.info("state publisher listening on %s:%d", self._host, self._port)
 
     def stop(self) -> None:
         self._shutdown.set()
+
+        # Wake the writer thread so it notices shutdown.
+        with self._frame_cond:
+            self._frame_cond.notify_all()
+
         if self._server_sock:
             try:
                 self._server_sock.close()
             except OSError:
                 pass
+
         with self._clients_lock:
             for c in self._clients:
                 try:
@@ -100,65 +135,92 @@ class StatePublisher:
                 except OSError:
                     pass
             self._clients.clear()
-        if self._thread:
-            self._thread.join(timeout=5.0)
+
+        if self._writer_thread:
+            self._writer_thread.join(timeout=5.0)
+        if self._accept_thread:
+            self._accept_thread.join(timeout=5.0)
 
     # ------------------------------------------------------------------
-    # Publishing (called from asyncio thread — must be fast)
+    # Publishing (called from asyncio thread — never blocks)
     # ------------------------------------------------------------------
 
     def publish(self, snapshot: dict[str, object]) -> None:
-        """Serialize and push a snapshot to all connected clients.
+        """Build a frame from the snapshot and hand it to the writer.
 
-        This is called from the main asyncio event loop.  The JSON
-        serialization + framing happens here (microseconds), then each
-        client gets a non-blocking send.  Dead clients are pruned.
+        Fast path only: JSON encode, HMAC, frame, hand off. Does not
+        touch any socket. Safe to call from the strategy event loop.
         """
+        frame = self._build_frame(snapshot)
+        if frame is None:
+            return
+        with self._frame_cond:
+            self._pending_frame = frame  # newest wins
+            self._frame_cond.notify()
+
+    def _build_frame(self, snapshot: dict[str, object]) -> bytes | None:
         try:
-            payload_str = json.dumps(snapshot, separators=(",", ":"))
+            payload = json.dumps(snapshot, separators=(",", ":")).encode("utf-8")
         except (TypeError, ValueError):
             log.warning("state_publisher: failed to serialize snapshot")
-            return
+            return None
 
-        payload_bytes = payload_str.encode("utf-8")
-        signature = hmac.new(self._hmac_key, payload_bytes, hashlib.sha256).hexdigest()
-        envelope = json.dumps(
-            {"payload": payload_str, "signature": signature},
-            separators=(",", ":"),
-        ).encode("utf-8")
-
-        if len(envelope) > _MAX_PAYLOAD:
+        if len(payload) > _MAX_PAYLOAD:
             log.warning(
                 "state_publisher: snapshot too large (%d bytes) — dropping",
-                len(envelope),
+                len(payload),
             )
-            return
+            return None
 
-        frame = struct.pack(_HEADER_FMT, len(envelope)) + envelope
+        mac = hmac.new(self._hmac_key, payload, hashlib.sha256).digest()
+        body = mac + payload
+        return struct.pack(_HEADER_FMT, len(body)) + body
 
-        # Cache for new clients that connect between publishes
-        with self._snapshot_lock:
-            self._snapshot_bytes = frame
+    # ------------------------------------------------------------------
+    # Writer thread — owns all sendall() calls
+    # ------------------------------------------------------------------
 
-        with self._clients_lock:
+    def _writer_loop(self) -> None:
+        while not self._shutdown.is_set():
+            with self._frame_cond:
+                while self._pending_frame is None and not self._shutdown.is_set():
+                    self._frame_cond.wait(timeout=_WRITER_IDLE_TIMEOUT)
+                frame = self._pending_frame
+                self._pending_frame = None
+
+            if frame is None:
+                continue
+
+            with self._clients_lock:
+                clients = list(self._clients)
+
             dead: list[socket.socket] = []
-            for client in self._clients:
+            for client in clients:
                 try:
                     client.sendall(frame)
                 except (OSError, BrokenPipeError, ConnectionResetError):
                     dead.append(client)
-            for client in dead:
-                try:
-                    client.close()
-                except OSError:
-                    pass
-                self._clients.remove(client)
+
             if dead:
+                with self._clients_lock:
+                    for client in dead:
+                        try:
+                            client.close()
+                        except OSError:
+                            pass
+                        try:
+                            self._clients.remove(client)
+                        except ValueError:
+                            pass
+                    active = len(self._clients)
                 log.info(
                     "state_publisher: pruned %d dead client(s), %d active",
                     len(dead),
-                    len(self._clients),
+                    active,
                 )
+
+            with self._snapshot_lock:
+                self._snapshot_bytes = frame
 
     # ------------------------------------------------------------------
     # Accept loop (daemon thread)
@@ -177,7 +239,7 @@ class StatePublisher:
             client.settimeout(_SEND_TIMEOUT)
             client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
-            # Send the most recent snapshot immediately so the visualizer
+            # Hydrate the new client with the most recent frame so it
             # doesn't have to wait for the next tick.
             with self._snapshot_lock:
                 cached = self._snapshot_bytes

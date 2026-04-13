@@ -58,10 +58,6 @@ rules_strategy:
   # missing the window (e.g. delta crossing threshold ~5s late) still fires.
   narrow_observe_window_threshold_s: 60.0
   post_observe_grace_s: 10.0
-  # v2.9 entry-price cap: refuse fills at best_ask >= this. Guards against
-  # the engine's realized-vs-conservative WR calibration gap (16 pp in v2.8).
-  # 0 disables. Set to 0.78 so break-even math holds at realized WR ~74%.
-  max_entry_price: 0.78
 
 # ---------------------------------------------------------------------------
 # Risk management
@@ -209,13 +205,6 @@ class RulesStrategyConfig:
     # was narrow; wide windows evaluate at close as before.
     narrow_observe_window_threshold_s: float = 60.0
     post_observe_grace_s: float = 10.0
-    # v2.9 entry-price cap. v2.8 realized directional accuracy was 74% vs the
-    # engine's ~90% conservative WR — a 16 pp calibration gap that blew past
-    # the break-even WR at the $0.78-$0.82 entries the bot was actually taking
-    # (break-even at ask=0.80 is WR=80%). Refuse any fill whose best_ask is
-    # >= this cap, giving a buffer against the calibration overstatement.
-    # 0 disables the gate.
-    max_entry_price: float = 0.78
 
 
 @dataclass(frozen=True, slots=True)

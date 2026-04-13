@@ -834,21 +834,6 @@ class MomentumSignalStrategy:
 
         entry_price = best_ask
 
-        # v2.9 hard entry-price cap. v2.8 lost -$56 with realized WR 74% vs
-        # engine-claim ~90% at $0.78-$0.82 entries; break-even at $0.80
-        # needs 80% WR. Refuse fills at or above the cap so we never buy
-        # into negative-EV territory while the engine calibration gap
-        # persists.
-        if self.cfg.max_entry_price > 0.0 and entry_price >= self.cfg.max_entry_price:
-            log.info(
-                "[SKIP] rank=%d side=%s reason=ENTRY_PRICE_CAP ask=%.3f cap=%.3f",
-                sc.rank,
-                sc.side.value,
-                entry_price,
-                self.cfg.max_entry_price,
-            )
-            return
-
         # Market-agreement filter: skip when live price deviates too far from
         # the signal's historical avg_entry_price (market strongly disagrees)
         if (

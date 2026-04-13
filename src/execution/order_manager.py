@@ -15,6 +15,7 @@ from py_clob_client.clob_types import (  # type: ignore[import-untyped]  # no st
 )
 from py_clob_client.order_builder.constants import (  # type: ignore[import-untyped]  # no stubs available
     BUY,
+    SELL,
 )
 
 from shared.discord import send_bet_cancelled
@@ -26,7 +27,9 @@ if TYPE_CHECKING:
     )
 
     from config import Config
+    from execution.base import KellyTelemetrySnapshot
     from market_data.state import MarketState
+    from risk.fee_tracker import FeeTracker
     from risk.registry import RiskRegistry
     from strategy.signal import Signal
 
@@ -46,32 +49,179 @@ class OrderManager:
         state: MarketState,
         clob: ClobClient,
         risk: RiskRegistry,
+        fee_tracker: FeeTracker,
     ) -> None:
         self.cfg = cfg
         self.state = state
         self.clob = clob
         self.risk = risk
+        self.fee_tracker = fee_tracker
         self._cancel_in_progress: bool = False
         self._cached_balance_usd: float | None = None
         # Track placed order details for cancel notifications
         self._order_details: dict[str, dict[str, Any]] = {}
         # Circuit breaker — stops hammering CLOB API after consecutive failures
         self._breaker = CircuitBreaker("clob_orders", failure_threshold=3, cooldown_sec=60.0)
-
-    # -- Paper-compatible no-ops (called unconditionally by MomentumSignalStrategy) --
+        # Per-window Kelly telemetry capture. PaperOrderManager stores these on
+        # WindowRecord; live stores here and ResolutionManager reads the snapshot
+        # at resolve time so the live JSONL matches paper's schema.
+        self._kelly_telemetry: KellyTelemetrySnapshot = {}
+        # Early-exit realized state. Set by exit_position_early when a live
+        # SELL fills; read by window_handler to short-circuit the Gamma-based
+        # resolution path (the trade is already realized — no need to wait).
+        self._early_exit_sell_price: float | None = None
+        self._early_exit_pnl: float | None = None
 
     def set_rule_triggered(self, rule_id: int, direction: str, signal: Signal | None) -> None:
-        """No-op in live mode. PaperOrderManager overrides to record in WindowRecord."""
+        self._kelly_telemetry["rule_triggered"] = rule_id
+        self._kelly_telemetry["rule_direction"] = direction
+        if signal is not None:
+            self._kelly_telemetry["rule_signal_features"] = signal.as_feature_dict()
 
     def set_kelly_fields(
         self,
-        **kwargs: float | bool | None,
+        kelly_adjusted_p: float | None = None,
+        kelly_vol_discount: float | None = None,
+        kelly_chop_discount: float | None = None,
+        kelly_outcome_discount: float | None = None,
+        kelly_total_discount: float | None = None,
+        kelly_feedback_adj: float | None = None,
+        kelly_raw_f: float | None = None,
+        kelly_fractional_f: float | None = None,
+        kelly_bet_size: float | None = None,
+        kelly_entry_price: float | None = None,
+        kelly_has_edge: bool | None = None,
+        bankroll_before: float | None = None,
+        sprt_factor: float | None = None,
+        final_bet_size: float | None = None,
     ) -> None:
-        """No-op in live mode. PaperOrderManager overrides to record in WindowRecord."""
+        t = self._kelly_telemetry
+        t["kelly_adjusted_p"] = kelly_adjusted_p
+        t["kelly_vol_discount"] = kelly_vol_discount
+        t["kelly_chop_discount"] = kelly_chop_discount
+        t["kelly_outcome_discount"] = kelly_outcome_discount
+        t["kelly_total_discount"] = kelly_total_discount
+        t["kelly_feedback_adj"] = kelly_feedback_adj
+        t["kelly_raw_f"] = kelly_raw_f
+        t["kelly_fractional_f"] = kelly_fractional_f
+        t["kelly_bet_size"] = kelly_bet_size
+        t["kelly_entry_price"] = kelly_entry_price
+        t["kelly_has_edge"] = kelly_has_edge
+        t["bankroll_before"] = bankroll_before
+        t["sprt_factor"] = sprt_factor
+        t["final_bet_size"] = final_bet_size
 
-    async def exit_position_early(self, sell_price: float) -> float | None:  # noqa: ARG002  # required by OrderExecutor Protocol
-        """No-op in live mode. PaperOrderManager overrides to simulate early exit."""
-        return None
+    def take_kelly_telemetry(self) -> KellyTelemetrySnapshot:
+        """Return and clear the current window's Kelly telemetry capture."""
+        snap = self._kelly_telemetry
+        self._kelly_telemetry = {}
+        return snap
+
+    async def exit_position_early(self, sell_price: float) -> float | None:
+        """Place a live SELL taker order to exit the current filled position.
+
+        Mirrors PaperOrderManager.exit_position_early: sums filled BUY fills
+        from ``state.live_fills``, places a FAK SELL against ``sell_price`` on
+        the same token, computes realized P&L (including taker fee), and
+        stores the result so window-close bookkeeping can short-circuit the
+        Gamma-based resolution path. Returns the realized P&L or None if no
+        position existed or the CLOB SELL failed.
+        """
+        assert self.risk.tracker is not None  # noqa: S101  # set in RiskRegistry.from_config()
+        filled_buys = [f for f in self.state.live_fills.values() if f.side == "BUY"]
+        if not filled_buys:
+            log.info("live exit_position_early: no filled BUY fills to sell")
+            return None
+
+        token_id = filled_buys[0].token_id
+        # Guard against multi-token positions — our bot only buys one direction
+        # per window, so mixed tokens would indicate a bug upstream.
+        if any(f.token_id != token_id for f in filled_buys):
+            log.error("live exit_position_early: mixed token_ids in live_fills — aborting sell")
+            return None
+
+        total_shares = sum(f.size for f in filled_buys)
+        total_cost = sum(f.price * f.size for f in filled_buys)
+        if total_shares <= 0:
+            log.warning("live exit_position_early: total_shares <= 0, skipping")
+            return None
+        avg_entry = total_cost / total_shares
+
+        if not self._breaker.can_attempt():
+            log.warning("early exit blocked: CLOB circuit breaker OPEN")
+            return None
+
+        loop = asyncio.get_running_loop()
+        try:
+            # FAK SELL at the specified bid. OrderArgs side=SELL + OrderType.FAK
+            # fills whatever the book supports at that price and kills the rest
+            # — the taker equivalent of a buy-side FOK for sells.
+            signed_order = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    partial(
+                        self.clob.create_order,
+                        OrderArgs(
+                            price=sell_price,
+                            size=total_shares,
+                            side=SELL,
+                            token_id=token_id,
+                        ),
+                    ),
+                ),
+                timeout=_CLOB_CALL_TIMEOUT_SEC,
+            )
+            resp = await asyncio.wait_for(
+                loop.run_in_executor(
+                    None,
+                    partial(self.clob.post_order, signed_order, OrderType.FAK),
+                ),
+                timeout=_CLOB_CALL_TIMEOUT_SEC,
+            )
+        except TimeoutError:
+            self._breaker.record_failure()
+            log.warning("early exit SELL timed out after %.0fs", _CLOB_CALL_TIMEOUT_SEC)
+            return None
+        except (OSError, ValueError, KeyError) as exc:
+            self._breaker.record_failure()
+            log.warning("early exit SELL failed: %s", exc)
+            return None
+
+        order_id = resp.get("orderID", "")
+        if not order_id:
+            log.warning("early exit SELL rejected: %s", resp)
+            return None
+
+        self._breaker.record_success()
+        taker_fee = self.fee_tracker.record_taker_fee(sell_price, total_shares)
+        pnl = round(total_shares * (sell_price - avg_entry) - taker_fee, 4)
+        self._early_exit_sell_price = sell_price
+        self._early_exit_pnl = pnl
+
+        log.info(
+            "LIVE EARLY EXIT: sell_price=%.4f shares=%.2f avg_entry=%.4f "
+            "taker_fee=$%.4f pnl=$%.4f order_id=%s",
+            sell_price,
+            total_shares,
+            avg_entry,
+            taker_fee,
+            pnl,
+            str(order_id)[:12],
+        )
+        return pnl
+
+    def take_early_exit(self) -> tuple[float, float] | None:
+        """Return (sell_price, pnl) from the most recent early exit and clear.
+
+        Called by window_handler at window-close to detect whether an early
+        exit occurred this window and, if so, short-circuit Gamma resolution.
+        """
+        if self._early_exit_sell_price is None or self._early_exit_pnl is None:
+            return None
+        pair = (self._early_exit_sell_price, self._early_exit_pnl)
+        self._early_exit_sell_price = None
+        self._early_exit_pnl = None
+        return pair
 
     async def refresh_balance(self) -> float | None:
         """Fetch on-chain USDC balance from CLOB API and cache it.

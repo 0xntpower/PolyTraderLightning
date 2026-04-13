@@ -49,6 +49,7 @@ class FakeMarketState:
     down_token_id = "token_down"
     time_remaining = 200.0
     has_fresh_book_data = True
+    binance_obi = 0.0
 
     def __init__(self):
         self.end_snapshot = None
@@ -76,16 +77,25 @@ class FakeResolutionManager:
         self._is_pending = False
         self._create_result = None
         self._force_resolve_calls = []
+        self._pending = None
+        self._snapshot_writes = []
 
     @property
     def is_pending(self):
         return self._is_pending
+
+    @property
+    def pending(self):
+        return self._pending
 
     def create_pending(self, **kwargs):
         return self._create_result
 
     def force_resolve(self, **kwargs):
         self._force_resolve_calls.append(kwargs)
+
+    def write_pending_snapshot(self, pr):
+        self._snapshot_writes.append(pr)
 
 
 class FakePositionTracker:
@@ -381,6 +391,7 @@ def _make_handler(**overrides):
         "fee_tracker": FakeFeeTracker(),
         "bankroll_tracker": FakeBankrollTracker(),
         "recent_outcomes": deque(maxlen=50),
+        "optimistic_outcomes": deque(maxlen=50),
         "session_stats": FakeSessionStats(),
         "skip_tracker": FakeSkipTracker(),
         "loss_tracker": FakeLossTracker(),

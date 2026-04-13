@@ -66,6 +66,8 @@ from utils.log import setup_logging
 from utils.reconnect import FeedHealthMonitor, ws_connect_forever
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from py_clob_client.client import (  # type: ignore[import-untyped]  # no stubs available
         ClobClient,
     )
@@ -716,6 +718,11 @@ async def _strategy_loop(
         path=paths.bankroll,
     )
     recent_outcomes: deque[int] = deque(maxlen=KELLY_OUTCOME_WINDOW_SIZE)
+    # Parallel deque of in-flight optimistic live outcomes (from end-of-window
+    # snapshots, before Gamma API confirms). Shared between ResolutionManager
+    # (appends on fire, drains on resolve) and WindowEventHandler (merges into
+    # the Kelly feedback view). Always empty in paper mode.
+    optimistic_outcomes: deque[int] = deque(maxlen=KELLY_OUTCOME_WINDOW_SIZE)
 
     # Warmup credit — backdate bot_start_time using pre-existing tracker data
     _bot_start_time = time.time()
@@ -730,6 +737,13 @@ async def _strategy_loop(
     session_stats = SessionAccumulator()
 
     # Resolution manager — single pipeline for all resolution paths
+    # Live-only balance refresher: pulled by ResolutionManager after every
+    # confirmed live resolve to keep Kelly bankroll aligned with on-chain USDC.
+    _balance_refresher: Callable[[], Awaitable[float | None]] | None = None
+    if isinstance(order_mgr, OrderManager) and order_mgr.mode == "live":
+        _live_mgr = order_mgr
+        _balance_refresher = _live_mgr.refresh_balance
+
     resolution_mgr = ResolutionManager(
         window_tracker=window_tracker,
         state=state,
@@ -744,6 +758,8 @@ async def _strategy_loop(
         loss_tracker=loss_tracker,
         cfg=cfg,
         paths=paths,
+        optimistic_outcomes=optimistic_outcomes,
+        balance_refresher=_balance_refresher,
     )
 
     # Window event handler — consolidates the ~570-line window transition block
@@ -757,6 +773,7 @@ async def _strategy_loop(
         fee_tracker=fee_tracker,
         bankroll_tracker=bankroll_tracker,
         recent_outcomes=recent_outcomes,
+        optimistic_outcomes=optimistic_outcomes,
         session_stats=session_stats,
         skip_tracker=skip_tracker,
         loss_tracker=loss_tracker,
@@ -777,13 +794,31 @@ async def _strategy_loop(
     _LATENCY_REPORT_INTERVAL = 3600.0  # noqa: N806  # constant defined in function scope
     _last_latency_report = time.time()
 
-    # Live mode: sync bankroll from on-chain balance before trading
+    # Live mode: sync bankroll from on-chain balance before trading.
+    # Symmetric to paper's BANKROLL_STARTUP_DRIFT check in window_handler.py
+    # — surface large drift at WARNING so stale bankroll.json state is
+    # visible at boot instead of only showing up in sync_from_api's INFO line.
     if order_mgr.mode == "live" and isinstance(order_mgr, OrderManager):
         _api_bal = await order_mgr.refresh_balance()
         if _api_bal is not None and _api_bal > 0:
-            _drift = bankroll_tracker.sync_from_api(_api_bal)
-            if abs(_drift) <= 0.01:
-                log.info("bankroll synced from API: $%.2f (no drift)", _api_bal)
+            _local_bal = bankroll_tracker.bankroll
+            _drift = _api_bal - _local_bal
+            if abs(_drift) > 1.0:
+                log.warning(
+                    "BANKROLL_STARTUP_DRIFT kelly_br=$%.2f onchain_br=$%.2f drift=%+.2f "
+                    "— stale bankroll.json, reconciling to on-chain balance",
+                    _local_bal,
+                    _api_bal,
+                    _drift,
+                )
+            else:
+                log.info(
+                    "bankroll startup check: kelly_br=$%.2f onchain_br=$%.2f drift=%+.2f OK",
+                    _local_bal,
+                    _api_bal,
+                    _drift,
+                )
+            bankroll_tracker.sync_from_api(_api_bal)
             window_handler._last_bankroll_sync = time.time()
         else:
             log.warning(
@@ -1257,7 +1292,7 @@ async def run(signal_path_override: str | None = None, standalone: bool = False)
             )
             order_mgr: OrderManager | PaperOrderManager = paper_mgr
         else:
-            order_mgr = OrderManager(cfg, state, clob, risk)
+            order_mgr = OrderManager(cfg, state, clob, risk, fee_tracker)
             today_str = datetime.now(UTC).strftime("%Y-%m-%d")
             position_tracker.load_state(paths.state, today_str, current_signal_id=_signal_id)
             log.info("LIVE trading mode")

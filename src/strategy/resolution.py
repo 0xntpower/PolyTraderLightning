@@ -14,9 +14,9 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import orjson
 
@@ -24,9 +24,11 @@ from strategy.signal import Direction
 
 if TYPE_CHECKING:
     from collections import deque
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from config import Config, DataPaths
+    from execution.base import KellyTelemetrySnapshot
     from market_data.state import MarketState
     from risk.fee_tracker import FeeTracker
     from risk.position_tracker import PositionTracker
@@ -37,12 +39,21 @@ if TYPE_CHECKING:
     from strategy.monitors import ConsecutiveLossTracker, SessionAccumulator
     from strategy.window_tracker import WindowTracker
 
+    BalanceRefresher = Callable[[], Awaitable[float | None]]
+
 log = logging.getLogger(__name__)
 
 # Timing constants — match the values previously in main.py
 RESOLUTION_POLL_DELAY = 30.0  # seconds before first Gamma poll
 RESOLUTION_POLL_INTERVAL = 5.0  # seconds between polls
 RESOLUTION_TIMEOUT = 1200.0  # fall back after ~20 min
+
+
+def _empty_kelly_telemetry() -> KellyTelemetrySnapshot:
+    # Typed factory so the dataclass default_factory matches PendingResolution's
+    # field type without a cast. A bare ``dict`` factory is inferred as
+    # ``dict[Never, Never]`` and fails strict assignment.
+    return {}
 
 
 @dataclass
@@ -58,6 +69,15 @@ class PendingResolution:
     created_at: float  # time.time() when created
     last_poll_at: float = 0.0
     snapshot_outcome: str | None = None  # "up", "down", or None
+    kelly_telemetry: KellyTelemetrySnapshot = field(default_factory=_empty_kelly_telemetry)
+    window_delta_pct: float = 0.0
+    # True if an optimistic entry was pushed to optimistic_outcomes
+    optimistic_counted: bool = False
+    # Early-exit realized state — set when the position was sold mid-window via
+    # CUSUM erosion trigger. When present, _resolve uses these instead of the
+    # $1/$0 resolution-based P&L calc and does not wait for Gamma.
+    early_exit_pnl: float | None = None
+    early_exit_sell_price: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +112,8 @@ class ResolutionManager:
         loss_tracker: ConsecutiveLossTracker,
         cfg: Config,
         paths: DataPaths,
+        optimistic_outcomes: deque[int],
+        balance_refresher: BalanceRefresher | None = None,
     ) -> None:
         self._window_tracker = window_tracker
         self._state = state
@@ -101,11 +123,13 @@ class ResolutionManager:
         self._journal = journal
         self._decay_detector = decay_detector
         self._recent_outcomes = recent_outcomes
+        self._optimistic_outcomes = optimistic_outcomes
         self._results_dir = results_dir
         self._session_stats = session_stats
         self._loss_tracker = loss_tracker
         self._cfg = cfg
         self._paths = paths
+        self._balance_refresher = balance_refresher
         self._pending: PendingResolution | None = None
         self._last_result: ResolutionResult | None = None
 
@@ -141,6 +165,10 @@ class ResolutionManager:
         *,
         mode: str = "live",
         signal_id: str = "",
+        kelly_telemetry: KellyTelemetrySnapshot | None = None,
+        window_delta_pct: float = 0.0,
+        early_exit_pnl: float | None = None,
+        early_exit_sell_price: float | None = None,
     ) -> ResolutionResult | None:
         """Create a new pending resolution, force-resolving any existing one first.
 
@@ -155,6 +183,18 @@ class ResolutionManager:
                 mode=mode,
             )
 
+        # Optimistic outcome feedback: if a live fire closes with a snapshot
+        # outcome, feed it into the parallel optimistic_outcomes deque now so
+        # the next window's Kelly sizing sees a fresh feedback signal instead
+        # of one that's 15-20 min stale. The entry is drained and replaced
+        # with the authoritative value when _resolve runs. Paper mode does
+        # not need this — its feedback is already immediate.
+        optimistic_counted = False
+        if mode == "live" and snapshot_outcome is not None:
+            won_guess = 1 if snapshot_outcome == signal_cfg.side.value else 0
+            self._optimistic_outcomes.append(won_guess)
+            optimistic_counted = True
+
         self._pending = PendingResolution(
             window_ts=window_ts,
             slug=slug,
@@ -164,16 +204,22 @@ class ResolutionManager:
             signal_age_windows=signal_age_windows,
             created_at=time.time(),
             snapshot_outcome=snapshot_outcome,
+            kelly_telemetry=kelly_telemetry if kelly_telemetry is not None else {},
+            window_delta_pct=window_delta_pct,
+            optimistic_counted=optimistic_counted,
+            early_exit_pnl=early_exit_pnl,
+            early_exit_sell_price=early_exit_sell_price,
         )
         log.info(
             "trade pending resolution: window=%d slug=%s "
-            "side=%s entry=%.2f size=$%.2f (snapshot_outcome=%s)",
+            "side=%s entry=%.2f size=$%.2f (snapshot_outcome=%s optimistic=%s)",
             window_ts,
             slug,
             signal_cfg.side.value,
             entry_price,
             size_usd,
             snapshot_outcome,
+            optimistic_counted,
         )
         return force_result
 
@@ -186,6 +232,18 @@ class ResolutionManager:
             return None
 
         pr = self._pending
+
+        # Early-exit short-circuit: the position was sold mid-window via
+        # ``exit_position_early``, so we already have realized P&L and don't
+        # need to wait for Gamma. Resolve immediately with a synthetic outcome
+        # (snapshot if available, else conservative). ``_resolve`` uses
+        # ``pr.early_exit_pnl`` and ignores the outcome-based calc.
+        if pr.early_exit_pnl is not None:
+            synthetic_outcome = self._force_resolve_outcome(pr)
+            result = self._resolve(pr, synthetic_outcome, mode=mode)
+            await self._reconcile_bankroll(mode)
+            return result
+
         elapsed = now - pr.created_at
         since_last_poll = now - pr.last_poll_at
 
@@ -208,7 +266,9 @@ class ResolutionManager:
             )
             # finalPrice(N) = close of resolved window N = open of current window N+1
             self._try_oracle_upgrade(resolution_data.final_price)
-            return self._resolve(pr, resolution_data.outcome, mode=mode)
+            result = self._resolve(pr, resolution_data.outcome, mode=mode)
+            await self._reconcile_bankroll(mode)
+            return result
 
         # Timeout check
         if elapsed >= RESOLUTION_TIMEOUT:
@@ -232,9 +292,36 @@ class ResolutionManager:
                     elapsed / 60,
                     fallback,
                 )
-            return self._resolve(pr, fallback, mode=mode)
+            result = self._resolve(pr, fallback, mode=mode)
+            await self._reconcile_bankroll(mode)
+            return result
 
         return None
+
+    async def _reconcile_bankroll(self, mode: str) -> None:
+        """Pull on-chain balance and sync local bankroll after a live resolve.
+
+        Mirror of paper Fix 4 (window_handler.py sync_from_api after settled
+        paper trade). In live mode the analogous drift source is CUSUM early
+        exit + taker-fee model error: update_win/loss tracks entry-price P&L,
+        but the real USDC delta on-chain includes realized sell proceeds from
+        early exits and true taker fees. Without this reconcile, Kelly sizes
+        off an increasingly stale bankroll.
+        """
+        if mode != "live" or self._balance_refresher is None:
+            return
+        api_bal = await self._balance_refresher()
+        if api_bal is None or api_bal <= 0:
+            return
+        drift = api_bal - self._bankroll_tracker.bankroll
+        if abs(drift) > 0.01:
+            log.info(
+                "post-resolve bankroll reconcile: kelly=$%.2f onchain=$%.2f drift=%+.2f",
+                self._bankroll_tracker.bankroll,
+                api_bal,
+                drift,
+            )
+        self._bankroll_tracker.sync_from_api(api_bal)
 
     def force_resolve(
         self,
@@ -345,33 +432,70 @@ class ResolutionManager:
         entry_price = pr.entry_price
         size_usd = pr.size_usd
         shares = size_usd / entry_price
+        is_early_exit = pr.early_exit_pnl is not None
 
-        # Taker fee deduction
-        taker_fee = self._fee_tracker.record_taker_fee(entry_price, shares)
-
-        bet_won = outcome == sc.side.value
-        if bet_won:
-            pnl = round(shares * (1.0 - entry_price) - taker_fee, 4)
-            won = True
+        if is_early_exit:
+            # CUSUM sold the position mid-window. ``exit_position_early``
+            # already recorded the sell-side taker fee on the fee tracker and
+            # computed realized P&L, so skip the $1/$0 resolution calc. SPRT
+            # counts early exits by the sign of realized P&L — a profitable
+            # exit is a "win", an erosion-driven loss exit is a "loss".
+            assert pr.early_exit_pnl is not None  # noqa: S101  # is_early_exit invariant
+            pnl = pr.early_exit_pnl
+            won = pnl > 0
+            log.info(
+                "live early-exit resolution: window=%d side=%s sell=%.4f pnl=$%.4f "
+                "(snapshot_outcome=%s market_outcome=%s)",
+                pr.window_ts,
+                sc.side.value,
+                pr.early_exit_sell_price or 0.0,
+                pnl,
+                pr.snapshot_outcome,
+                outcome,
+            )
         else:
-            pnl = round(-(shares * entry_price) - taker_fee, 4)
-            won = False
+            # Taker fee deduction
+            taker_fee = self._fee_tracker.record_taker_fee(entry_price, shares)
 
-        log.info(
-            "live resolution: window=%d side=%s outcome=%s → %s pnl=$%.4f "
-            "(entry=%.2f shares=%.1f taker_fee=$%.4f)",
-            pr.window_ts,
-            sc.side.value,
-            outcome,
-            "WIN" if won else "LOSS",
-            pnl,
-            entry_price,
-            shares,
-            taker_fee,
-        )
+            bet_won = outcome == sc.side.value
+            if bet_won:
+                pnl = round(shares * (1.0 - entry_price) - taker_fee, 4)
+                won = True
+            else:
+                pnl = round(-(shares * entry_price) - taker_fee, 4)
+                won = False
 
-        # Bankroll update
-        if won:
+            log.info(
+                "live resolution: window=%d side=%s outcome=%s → %s pnl=$%.4f "
+                "(entry=%.2f shares=%.1f taker_fee=$%.4f)",
+                pr.window_ts,
+                sc.side.value,
+                outcome,
+                "WIN" if won else "LOSS",
+                pnl,
+                entry_price,
+                shares,
+                taker_fee,
+            )
+
+        # Drain the optimistic pre-resolution feedback entry before appending
+        # the authoritative one. Pendings resolve in FIFO order so a single
+        # popleft is correct. If the optimistic deque underflowed (e.g. a
+        # race where the pending was created before optimistic tracking was
+        # wired up), skip gracefully.
+        if pr.optimistic_counted and self._optimistic_outcomes:
+            self._optimistic_outcomes.popleft()
+
+        # Bankroll update — for early exits, skip the $1/$0-based recalc in
+        # update_win/update_loss and let ``_reconcile_bankroll`` (called after
+        # _resolve in tick()/window_handler) pull the authoritative on-chain
+        # balance. Still record the outcome in recent_outcomes for Kelly.
+        if is_early_exit:
+            if won:
+                self._recent_outcomes.append(1)
+            else:
+                self._recent_outcomes.append(0)
+        elif won:
             self._bankroll_tracker.update_win(size_usd, entry_price, fee=taker_fee)
             self._recent_outcomes.append(1)
         else:
@@ -387,18 +511,20 @@ class ResolutionManager:
             balance=self._bankroll_tracker.bankroll,
         )
 
-        # Discord notification
-        from shared.discord import send_bet_result
+        # Discord notification — skip for early exits, since momentum_signal
+        # already fired send_early_exit at the time of the sell.
+        if not is_early_exit:
+            from shared.discord import send_bet_result
 
-        send_bet_result(
-            mode=mode,
-            outcome="WIN" if won else "LOSS",
-            pnl=pnl,
-            entry_price=entry_price,
-            side=sc.side.value,
-            size_usd=size_usd,
-            balance=self._bankroll_tracker.bankroll,
-        )
+            send_bet_result(
+                mode=mode,
+                outcome="WIN" if won else "LOSS",
+                pnl=pnl,
+                entry_price=entry_price,
+                side=sc.side.value,
+                size_usd=size_usd,
+                balance=self._bankroll_tracker.bankroll,
+            )
 
         # Journal record
         from shared.trade_journal import TradeJournal, TradeRecord
@@ -513,35 +639,68 @@ class ResolutionManager:
             signal_age_windows=pr.signal_age_windows,
         )
 
-    def _write_live_window_record(self, pr: PendingResolution, outcome: str, pnl: float) -> None:
-        """Write a per-window JSONL record for live mode."""
+    def write_pending_snapshot(self, pr: PendingResolution) -> None:
+        """Write an optimistic pre-resolution JSONL record at fill time.
+
+        Mirrors paper's immediate _finalize_paper_window write so a crash
+        between fill and resolution doesn't lose the trade evidence. The
+        record is marked ``pending=True``; a second line with the resolved
+        outcome and pnl gets appended when the market resolves. Downstream
+        analysis tools take the last line per ``window_ts``.
+        """
+        self._write_live_window_record(pr, outcome=None, pnl=None, pending=True)
+
+    def _write_live_window_record(
+        self,
+        pr: PendingResolution,
+        outcome: str | None,
+        pnl: float | None,
+        *,
+        pending: bool = False,
+    ) -> None:
+        """Write a per-window JSONL record for live mode.
+
+        Mirrors the paper WindowRecord schema so post-session analysis tools
+        can parse both sources without mode-specific branching. When
+        ``pending`` is True, ``outcome`` and ``pnl`` are recorded as None;
+        the final write after resolution supersedes this line.
+        """
         self._results_dir.mkdir(parents=True, exist_ok=True)
         date_str = datetime.fromtimestamp(pr.window_ts, tz=UTC).strftime("%Y-%m-%d")
         path = self._results_dir / f"{date_str}.jsonl"
 
-        data = {
+        t = pr.kelly_telemetry
+        data: dict[str, Any] = {
             "window_ts": pr.window_ts,
-            "window_delta_pct": 0.0,  # not available after deferral
+            "window_delta_pct": pr.window_delta_pct,
             "direction": outcome,
             "actual_outcome": outcome,
             "fired": True,
             "filled": True,
+            "pending": pending,
             "pnl": pnl,
             "entry_price": pr.entry_price,
             "size_usd": pr.size_usd,
+            "early_exit": pr.early_exit_pnl is not None,
+            "early_exit_sell_price": pr.early_exit_sell_price,
             "bankroll": round(self._bankroll_tracker.bankroll, 4),
-            "signal_features": None,
-            "kelly_adjusted_p": None,
-            "kelly_vol_discount": None,
-            "kelly_chop_discount": None,
-            "kelly_outcome_discount": None,
-            "kelly_total_discount": None,
-            "kelly_feedback_adj": None,
-            "kelly_raw_f": None,
-            "kelly_fractional_f": None,
-            "kelly_bet_size": None,
-            "kelly_has_edge": None,
-            "sprt_factor": 1.0,
+            "signal_features": t.get("rule_signal_features"),
+            "rule_triggered": t.get("rule_triggered"),
+            "rule_direction": t.get("rule_direction"),
+            "kelly_adjusted_p": t.get("kelly_adjusted_p"),
+            "kelly_vol_discount": t.get("kelly_vol_discount"),
+            "kelly_chop_discount": t.get("kelly_chop_discount"),
+            "kelly_outcome_discount": t.get("kelly_outcome_discount"),
+            "kelly_total_discount": t.get("kelly_total_discount"),
+            "kelly_feedback_adj": t.get("kelly_feedback_adj"),
+            "kelly_raw_f": t.get("kelly_raw_f"),
+            "kelly_fractional_f": t.get("kelly_fractional_f"),
+            "kelly_bet_size": t.get("kelly_bet_size"),
+            "kelly_entry_price": t.get("kelly_entry_price"),
+            "kelly_has_edge": t.get("kelly_has_edge"),
+            "bankroll_before": t.get("bankroll_before"),
+            "sprt_factor": t.get("sprt_factor", 1.0),
+            "final_bet_size": t.get("final_bet_size"),
         }
 
         try:

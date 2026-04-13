@@ -2,10 +2,38 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Protocol, TypedDict, runtime_checkable
 
 if TYPE_CHECKING:
     from strategy.signal import Signal
+
+
+class KellyTelemetrySnapshot(TypedDict, total=False):
+    """Point-in-time Kelly/rule capture recorded at fire, read at resolution.
+
+    Shared schema so paper WindowRecord and live ResolutionManager write the
+    same fields to JSONL — prevents analysis tooling from branching per mode.
+    Every field is optional (total=False) because fires can occur before
+    Kelly is fully populated (e.g. warmup) or when sizing is bypassed.
+    """
+
+    rule_triggered: int
+    rule_direction: str
+    rule_signal_features: dict[str, float]
+    kelly_adjusted_p: float | None
+    kelly_vol_discount: float | None
+    kelly_chop_discount: float | None
+    kelly_outcome_discount: float | None
+    kelly_total_discount: float | None
+    kelly_feedback_adj: float | None
+    kelly_raw_f: float | None
+    kelly_fractional_f: float | None
+    kelly_bet_size: float | None
+    kelly_entry_price: float | None
+    kelly_has_edge: bool | None
+    bankroll_before: float | None
+    sprt_factor: float | None
+    final_bet_size: float | None
 
 
 @runtime_checkable

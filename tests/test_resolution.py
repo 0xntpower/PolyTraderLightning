@@ -182,6 +182,7 @@ def resolution_env(tmp_path):
     journal = FakeJournal()
     decay_detector = FakeDecayDetector()
     recent_outcomes = deque(maxlen=20)
+    optimistic_outcomes = deque(maxlen=20)
     results_dir = tmp_path / "results"
     session_stats = FakeSessionStats()
     loss_tracker = FakeLossTracker()
@@ -203,6 +204,7 @@ def resolution_env(tmp_path):
         loss_tracker=loss_tracker,
         cfg=cfg,
         paths=paths,
+        optimistic_outcomes=optimistic_outcomes,
     )
 
     return {

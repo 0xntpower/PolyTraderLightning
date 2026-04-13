@@ -88,6 +88,11 @@ class StatePublisher:
         self._frame_cond = threading.Condition()
         self._pending_frame: bytes | None = None
 
+        # Monotonic frame sequence number — stamped onto every published
+        # snapshot so the visualizer can detect drops, coalesced frames,
+        # or a publisher restart (seq jumps backwards to 1).
+        self._seq = 0
+
         # Cached last-sent frame for instant hydration of new connections.
         self._snapshot_lock = threading.Lock()
         self._snapshot_bytes: bytes = b""
@@ -148,9 +153,12 @@ class StatePublisher:
     def publish(self, snapshot: dict[str, object]) -> None:
         """Build a frame from the snapshot and hand it to the writer.
 
-        Fast path only: JSON encode, HMAC, frame, hand off. Does not
-        touch any socket. Safe to call from the strategy event loop.
+        Fast path only: stamp the monotonic seq, JSON encode, HMAC,
+        frame, hand off. Does not touch any socket. Safe to call from
+        the strategy event loop.
         """
+        self._seq += 1
+        snapshot["seq"] = self._seq
         frame = self._build_frame(snapshot)
         if frame is None:
             return

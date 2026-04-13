@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     import aiohttp
 
     from config import Config, DataPaths
+    from execution.base import KellyTelemetrySnapshot
     from execution.order_manager import OrderManager
     from execution.paper_trading import PaperOrderManager
     from market_data.state import MarketState, WindowSnapshot
@@ -123,6 +124,7 @@ class WindowEventHandler:
         fee_tracker: FeeTracker,
         bankroll_tracker: BankrollTracker,
         recent_outcomes: deque[int],
+        optimistic_outcomes: deque[int],
         session_stats: SessionAccumulator,
         skip_tracker: SkipStreakTracker,
         loss_tracker: ConsecutiveLossTracker,
@@ -150,6 +152,7 @@ class WindowEventHandler:
         self._fee_tracker = fee_tracker
         self._bankroll_tracker = bankroll_tracker
         self._recent_outcomes = recent_outcomes
+        self._optimistic_outcomes = optimistic_outcomes
         self._session_stats = session_stats
         self._skip_tracker = skip_tracker
         self._loss_tracker = loss_tracker
@@ -385,6 +388,23 @@ class WindowEventHandler:
             )
             if entry_price > 0 and size_usd > 0:
                 snap_outcome = _compute_snapshot_outcome(state.end_snapshot)
+                # Snapshot Kelly telemetry + closing window delta from the live
+                # OrderManager so the resolution-time JSONL record mirrors
+                # paper's WindowRecord schema. This call also clears the
+                # capture so the next window starts fresh.
+                from execution.order_manager import OrderManager as _LiveMgr
+
+                _telemetry: KellyTelemetrySnapshot | None = None
+                _early_exit: tuple[float, float] | None = None
+                if isinstance(order_mgr, _LiveMgr):
+                    _telemetry = order_mgr.take_kelly_telemetry()
+                    _early_exit = order_mgr.take_early_exit()
+                _close_snap = state.end_snapshot
+                _close_delta = (
+                    compute_signal_from_snapshot(_close_snap).delta_pct
+                    if _close_snap and _close_snap.window_ts == last_window_ts
+                    else compute_signal(state).delta_pct
+                )
                 _force_result = self._resolution_mgr.create_pending(
                     window_ts=last_window_ts,
                     slug=self._window_tracker.make_slug(last_window_ts),
@@ -395,7 +415,18 @@ class WindowEventHandler:
                     snapshot_outcome=snap_outcome,
                     mode=order_mgr.mode,
                     signal_id=strategy.signal_cfg.signal_id,
+                    kelly_telemetry=_telemetry,
+                    window_delta_pct=_close_delta,
+                    early_exit_pnl=_early_exit[1] if _early_exit is not None else None,
+                    early_exit_sell_price=_early_exit[0] if _early_exit is not None else None,
                 )
+                # Persist the pre-resolution snapshot immediately so the
+                # trade is recoverable if the bot dies before the Gamma
+                # API confirms. Resolution will append a finalized line;
+                # downstream analysis takes the last line per window_ts.
+                _pending = self._resolution_mgr.pending
+                if _pending is not None:
+                    self._resolution_mgr.write_pending_snapshot(_pending)
                 if (
                     _force_result is not None
                     and _force_result.verdict == "DEAD"
@@ -432,25 +463,27 @@ class WindowEventHandler:
                 balance=self._bankroll_tracker.bankroll,
             )
 
-        # Paper mode journal
-        if is_paper:
-            from shared.trade_journal import TradeRecord
+        # Journal — paper records full outcome immediately; live records the
+        # fire event here (won/pnl None) so skipped/unfilled/fired rows are
+        # captured even if the bot dies before resolution. Resolution will
+        # append its own finalized entry via resolution.py's journal write.
+        from shared.trade_journal import TradeRecord
 
-            self._journal.record_trade(
-                TradeRecord(
-                    timestamp=self._journal.now_iso(),
-                    signal_id=sc.signal_id,
-                    signal_side=sc.side.value,
-                    window_ts=last_window_ts,
-                    fired=fired,
-                    filled=filled,
-                    won=won,
-                    entry_price=entry_price,
-                    pnl=pnl,
-                    source=source,
-                    signal_age_windows=self._lifecycle.signal_age_windows,
-                )
+        self._journal.record_trade(
+            TradeRecord(
+                timestamp=self._journal.now_iso(),
+                signal_id=sc.signal_id,
+                signal_side=sc.side.value,
+                window_ts=last_window_ts,
+                fired=fired,
+                filled=filled,
+                won=won if is_paper else None,
+                entry_price=entry_price,
+                pnl=pnl if is_paper else 0.0,
+                source=source,
+                signal_age_windows=self._lifecycle.signal_age_windows,
             )
+        )
 
         # Window decision log
         _order_placed = strategy._order_placed
@@ -772,6 +805,7 @@ class WindowEventHandler:
                 )
             self._lifecycle.reset_for_new_signal()
             self._recent_outcomes.clear()
+            self._optimistic_outcomes.clear()
 
             from shared.decay_detector import DecayDetector
 
@@ -884,6 +918,19 @@ class WindowEventHandler:
             strategy.signal_cfg.side.value,
         )
 
+        # Merge any live optimistic outcomes into the Kelly feedback view.
+        # In paper mode the optimistic deque is always empty. In live mode
+        # this fast-forwards the feedback loop by 15-20 min (the resolution
+        # defer) so next-window sizing reflects just-resolved snapshot guesses.
+        _kelly_outcomes: deque[int] = self._recent_outcomes
+        if self._optimistic_outcomes:
+            from collections import deque as _deque
+
+            _kelly_outcomes = _deque(
+                list(self._recent_outcomes) + list(self._optimistic_outcomes),
+                maxlen=self._recent_outcomes.maxlen,
+            )
+
         _kelly_wr_result = estimate_adjusted_win_rate(
             base_win_rate=strategy.signal_cfg.conservative_p(cfg.sizing.wilson_max_shrink_pct),
             vol_stddev=_vol_stddev,
@@ -900,7 +947,7 @@ class WindowEventHandler:
             chop_weight=cfg.sizing.chop_weight,
             outcome_weight=cfg.sizing.outcome_weight,
             regime_ready=_regime_ready,
-            recent_outcomes=self._recent_outcomes,
+            recent_outcomes=_kelly_outcomes,
             min_outcomes_for_feedback=cfg.sizing.feedback_min_trades,
         )
 

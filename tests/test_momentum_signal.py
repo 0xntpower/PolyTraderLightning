@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from config import ErosionConfig, SizingConfig
@@ -626,6 +628,267 @@ class TestEntryPriceCap:
 
         assert strategy._fired
         assert len(executor.calls) == 0
+
+
+# ---------------------------------------------------------------------------
+# v2.9 CUSUM sustain gate + price-aware suppression tests
+# ---------------------------------------------------------------------------
+
+
+class _FakeErosionOrderMgr:
+    """Minimal OrderExecutor for post-fire erosion monitoring tests.
+
+    Records calls to exit_position_early so tests can assert whether the
+    CUSUM path actually fired an exit.
+    """
+
+    mode = "paper"
+
+    def __init__(self) -> None:
+        self.exit_calls: list[float] = []
+
+    async def exit_position_early(self, sell_price: float) -> float:
+        self.exit_calls.append(sell_price)
+        return 0.0
+
+
+class _Clock:
+    """Monotonic-clock stand-in with explicit advance() control."""
+
+    def __init__(self, start: float = 1000.0) -> None:
+        self.t = start
+
+    def advance(self, dt: float) -> None:
+        self.t += dt
+
+    def __call__(self) -> float:
+        return self.t
+
+
+def _prime_erosion_state(
+    *,
+    side: Direction = Direction.UP,
+    best_bid_up: float = 0.20,
+    best_bid_down: float = 0.20,
+    threshold: float = 0.5,
+) -> tuple[MomentumSignalStrategy, _FakeErosionOrderMgr]:
+    """Build a 'fired' strategy with CUSUM primed just at the limit.
+
+    - fire_delta = ±1.0% so an incoming tick with bn=0 gives raw erosion = 1.0
+      (which is below panic_threshold = 1.1 at the default 2.2x multiplier,
+      so we stay in the CUSUM path)
+    - erosion_ema starts at 0.80 (above threshold+tolerance = 0.55)
+    - _erosion_cusum starts at the limit (0.80) so the next tick's excess
+      pushes it over
+    - last_entry_price = 0.80 so _execute_early_exit has a valid entry to
+      sell against if the exit path fires
+    """
+    cfg = make_rules_config()
+    state = make_market_state(best_bid_up=best_bid_up, best_bid_down=best_bid_down)
+    base_sc = make_signal_config(side=side)
+    sc = replace(base_sc, post_fire_max_safe_erosion_pct=threshold)
+    strategy = MomentumSignalStrategy(cfg, state, sc)
+    strategy.erosion_cfg = ErosionConfig()
+    strategy._fire_delta_pct = 1.0 if side == Direction.UP else -1.0
+    strategy._erosion_ema = 0.80
+    strategy._erosion_ema_initialized = True
+    strategy._erosion_cusum = 0.80
+    strategy.last_entry_price = 0.80
+    return strategy, _FakeErosionOrderMgr()
+
+
+def _patch_erosion_env(monkeypatch: pytest.MonkeyPatch, clock: _Clock) -> None:
+    """Pin time.monotonic to the fake clock and neutralise Discord sends."""
+    monkeypatch.setattr("strategy.momentum_signal.time.monotonic", clock)
+    monkeypatch.setattr("strategy.momentum_signal.send_early_exit", lambda **kw: None)
+
+
+class TestCusumSustainGate:
+    """v2.9 CUSUM sustain gate — single-tick breaches must not trigger exit.
+
+    v2.8 had 2 hard-false + 1 partial-false CUSUM exits out of 9 (33% false
+    rate), all firing on a single tick. The sustain gate requires the breach
+    to persist for cusum_sustain_s (default 4.0s) before firing.
+    """
+
+    @pytest.mark.asyncio
+    async def test_single_tick_breach_does_not_exit(self, monkeypatch):
+        """First tick over the limit starts the sustain timer and holds."""
+        strategy, order_mgr = _prime_erosion_state()
+        clock = _Clock(start=1000.0)
+        _patch_erosion_env(monkeypatch, clock)
+
+        sig = _make_signal(bn_direction_from_open_pct=0.0)
+        await strategy._monitor_post_fire_erosion(sig, order_mgr)
+
+        # CUSUM went above the limit but the sustain gate held the exit.
+        assert strategy._erosion_cusum >= strategy.erosion_cfg.cusum_limit
+        assert strategy._cusum_breach_started_at == 1000.0
+        assert not strategy._early_exit_triggered
+        assert order_mgr.exit_calls == []
+
+    @pytest.mark.asyncio
+    async def test_sustained_breach_exits_after_required_duration(self, monkeypatch):
+        """Continued breach beyond cusum_sustain_s triggers the exit."""
+        strategy, order_mgr = _prime_erosion_state(best_bid_up=0.20)
+        clock = _Clock(start=1000.0)
+        _patch_erosion_env(monkeypatch, clock)
+
+        sig = _make_signal(bn_direction_from_open_pct=0.0)
+
+        # Tick 1: sustain timer starts, no exit.
+        await strategy._monitor_post_fire_erosion(sig, order_mgr)
+        assert order_mgr.exit_calls == []
+
+        # Tick 2: 5.0s later — past the 4.0s sustain window, breach continues.
+        clock.advance(5.0)
+        await strategy._monitor_post_fire_erosion(sig, order_mgr)
+
+        assert strategy._early_exit_triggered
+        assert len(order_mgr.exit_calls) == 1
+        assert order_mgr.exit_calls[0] == pytest.approx(0.20)
+
+    @pytest.mark.asyncio
+    async def test_dropout_below_limit_resets_timer(self, monkeypatch):
+        """CUSUM dropping below limit mid-stream must clear the sustain timer
+        so a later re-breach gets a fresh clock."""
+        strategy, order_mgr = _prime_erosion_state()
+        clock = _Clock(start=1000.0)
+        _patch_erosion_env(monkeypatch, clock)
+
+        sig = _make_signal(bn_direction_from_open_pct=0.0)
+
+        # Tick 1: breach → timer starts.
+        await strategy._monitor_post_fire_erosion(sig, order_mgr)
+        assert strategy._cusum_breach_started_at == 1000.0
+
+        # Force internal state below the limit so the next tick's cusum
+        # update lands in the decay branch (ema below threshold+tolerance
+        # means excess==0 → cusum *= decay).
+        strategy._erosion_cusum = 0.50
+        strategy._erosion_ema = 0.40
+
+        clock.advance(1.0)
+        # bn=0.006 → current_pct=0.6 → raw erosion=(1.0-0.6)/1.0=0.4 (below
+        # threshold+tolerance=0.55 so no fresh excess).
+        recover_sig = _make_signal(bn_direction_from_open_pct=0.006)
+        await strategy._monitor_post_fire_erosion(recover_sig, order_mgr)
+
+        assert strategy._erosion_cusum < strategy.erosion_cfg.cusum_limit
+        assert strategy._cusum_breach_started_at is None
+        assert order_mgr.exit_calls == []
+
+    @pytest.mark.asyncio
+    async def test_sustain_disabled_with_zero_fires_on_first_tick(self, monkeypatch):
+        """cusum_sustain_s=0 disables the gate — single-tick exit allowed."""
+        strategy, order_mgr = _prime_erosion_state(best_bid_up=0.20)
+        strategy.erosion_cfg = ErosionConfig(cusum_sustain_s=0.0)
+        clock = _Clock(start=1000.0)
+        _patch_erosion_env(monkeypatch, clock)
+
+        sig = _make_signal(bn_direction_from_open_pct=0.0)
+        await strategy._monitor_post_fire_erosion(sig, order_mgr)
+
+        assert strategy._early_exit_triggered
+        assert len(order_mgr.exit_calls) == 1
+
+
+class TestCusumSuppression:
+    """v2.9 price-aware CUSUM suppression — refuse to exit when the market
+    already agrees with us.
+
+    v2.8 Trade 19 exited via CUSUM while bid_up=0.99 (market fully priced in
+    the winning outcome). Suppression holds when the top bid on our side is
+    already >= cusum_suppress_top_bid (default 0.85), preserving those wins.
+    """
+
+    @staticmethod
+    def _pre_sustained(
+        *,
+        side: Direction = Direction.UP,
+        best_bid_up: float = 0.20,
+        best_bid_down: float = 0.20,
+    ) -> tuple[MomentumSignalStrategy, _FakeErosionOrderMgr]:
+        """Same as _prime_erosion_state but with sustain already satisfied —
+        the next tick proceeds straight to the suppression check."""
+        strategy, order_mgr = _prime_erosion_state(
+            side=side, best_bid_up=best_bid_up, best_bid_down=best_bid_down
+        )
+        # Sustain started far in the past — any clock reading past 4.0s
+        # (via the test clock starting at 1000.0) clears the sustain gate.
+        strategy._cusum_breach_started_at = 0.0
+        return strategy, order_mgr
+
+    @pytest.mark.asyncio
+    async def test_suppression_holds_when_top_bid_agrees(self, monkeypatch):
+        """top_bid >= cusum_suppress_top_bid → hold position, no exit."""
+        strategy, order_mgr = self._pre_sustained(best_bid_up=0.90)
+        clock = _Clock(start=1000.0)
+        _patch_erosion_env(monkeypatch, clock)
+
+        sig = _make_signal(bn_direction_from_open_pct=0.0)
+        await strategy._monitor_post_fire_erosion(sig, order_mgr)
+
+        assert not strategy._early_exit_triggered
+        assert order_mgr.exit_calls == []
+
+    @pytest.mark.asyncio
+    async def test_suppression_boundary_equal_still_holds(self, monkeypatch):
+        """top_bid exactly equal to cusum_suppress_top_bid is suppressed (>=)."""
+        strategy, order_mgr = self._pre_sustained(best_bid_up=0.85)
+        clock = _Clock(start=1000.0)
+        _patch_erosion_env(monkeypatch, clock)
+
+        sig = _make_signal(bn_direction_from_open_pct=0.0)
+        await strategy._monitor_post_fire_erosion(sig, order_mgr)
+
+        assert not strategy._early_exit_triggered
+
+    @pytest.mark.asyncio
+    async def test_no_suppression_when_top_bid_disagrees(self, monkeypatch):
+        """top_bid < cusum_suppress_top_bid → exit proceeds."""
+        strategy, order_mgr = self._pre_sustained(best_bid_up=0.20)
+        clock = _Clock(start=1000.0)
+        _patch_erosion_env(monkeypatch, clock)
+
+        sig = _make_signal(bn_direction_from_open_pct=0.0)
+        await strategy._monitor_post_fire_erosion(sig, order_mgr)
+
+        assert strategy._early_exit_triggered
+        assert len(order_mgr.exit_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_suppression_disabled_with_zero(self, monkeypatch):
+        """cusum_suppress_top_bid=0 disables suppression — exit even at 0.99."""
+        strategy, order_mgr = self._pre_sustained(best_bid_up=0.99)
+        strategy.erosion_cfg = ErosionConfig(cusum_suppress_top_bid=0.0)
+        clock = _Clock(start=1000.0)
+        _patch_erosion_env(monkeypatch, clock)
+
+        sig = _make_signal(bn_direction_from_open_pct=0.0)
+        await strategy._monitor_post_fire_erosion(sig, order_mgr)
+
+        assert strategy._early_exit_triggered
+        assert len(order_mgr.exit_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_down_signal_reads_down_side_bid(self, monkeypatch):
+        """DOWN signals must check best_bid_down, not best_bid_up."""
+        strategy, order_mgr = self._pre_sustained(
+            side=Direction.DOWN,
+            best_bid_up=0.05,
+            best_bid_down=0.92,
+        )
+        clock = _Clock(start=1000.0)
+        _patch_erosion_env(monkeypatch, clock)
+
+        # For DOWN, fire_delta is -1.0%; bn=0 → erosion = (-1 - 0) / -1 = 1.0
+        sig = _make_signal(bn_direction_from_open_pct=0.0)
+        await strategy._monitor_post_fire_erosion(sig, order_mgr)
+
+        # best_bid_down=0.92 >= 0.85 → suppression holds the exit.
+        assert not strategy._early_exit_triggered
+        assert order_mgr.exit_calls == []
 
 
 # ---------------------------------------------------------------------------

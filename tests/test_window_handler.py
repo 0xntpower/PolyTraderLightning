@@ -539,6 +539,139 @@ class TestPaperTradeOutcome:
 
 
 # ---------------------------------------------------------------------------
+# v2.9 paper-mode Kelly/bankroll reconcile
+# ---------------------------------------------------------------------------
+
+
+from execution.paper_trading import PaperOrderManager as _RealPaperOrderManager
+
+
+class FakePaperOrderManager(_RealPaperOrderManager):
+    """Subclass of the real PaperOrderManager that skips heavy init.
+
+    Exists solely so the `isinstance(order_mgr, PaperOrderManager)` check in
+    window_handler._process_trade_outcome passes for unit tests, without
+    having to build a full Config / MarketState / RiskRegistry / FeeTracker
+    fixture. Satisfies every attribute _process_trade_outcome touches on
+    the order manager:
+    - ``mode`` (class attribute on the parent, defaults to "paper")
+    - ``_current_record`` (the WindowRecord for the finalised window)
+    - ``balance`` (inherited @property reads ``_balance``)
+    """
+
+    def __init__(self, *, balance: float = 900.0) -> None:
+        # Deliberately skip super().__init__ — we don't need the order book,
+        # risk registry, fee tracker, or results directory for these tests.
+        self._balance = balance
+        self._current_record: object | None = None
+
+
+class TestPaperBankrollReconcile:
+    """v2.9 per-settle paper-mode Kelly/bankroll reconcile.
+
+    v2.8 drifted: paper balance ended at $872 while Kelly bankroll ended at
+    $515 because update_win/update_loss ignores CUSUM early-exit sell prices.
+    After v2.9, every settled paper trade calls sync_from_api(order_mgr.balance)
+    so Kelly sizes off the authoritative paper balance.
+    """
+
+    @pytest.mark.asyncio
+    async def test_paper_win_reconciles_bankroll_from_order_mgr(self):
+        bankroll = FakeBankrollTracker()
+        bankroll.sync_from_api = MagicMock()
+        handler = _make_handler(bankroll_tracker=bankroll)
+
+        order_mgr = FakePaperOrderManager(balance=925.50)
+        order_mgr._current_record = FakePaperRecord(pnl=0.05, entry_price=0.85, filled=True)
+
+        strategy = FakeStrategy()
+        strategy._fired = True
+        strategy._order_placed = True
+        strategy.last_size_usd = 10.0
+
+        handler._process_trade_outcome(
+            strategy,
+            order_mgr,
+            FakeDecayDetector(),
+            last_window_ts=1000,
+        )
+
+        bankroll.sync_from_api.assert_called_once_with(925.50)
+
+    @pytest.mark.asyncio
+    async def test_paper_loss_still_reconciles(self):
+        """Losing trades must reconcile too — CUSUM early-exits land here."""
+        bankroll = FakeBankrollTracker()
+        bankroll.sync_from_api = MagicMock()
+        handler = _make_handler(bankroll_tracker=bankroll)
+
+        order_mgr = FakePaperOrderManager(balance=872.10)
+        order_mgr._current_record = FakePaperRecord(pnl=-0.10, entry_price=0.85, filled=True)
+
+        strategy = FakeStrategy()
+        strategy._fired = True
+        strategy._order_placed = True
+        strategy.last_size_usd = 10.0
+
+        handler._process_trade_outcome(
+            strategy,
+            order_mgr,
+            FakeDecayDetector(),
+            last_window_ts=1000,
+        )
+
+        bankroll.sync_from_api.assert_called_once_with(872.10)
+
+    @pytest.mark.asyncio
+    async def test_paper_unfilled_does_not_reconcile(self):
+        """No fill → no settled trade → no reconcile."""
+        bankroll = FakeBankrollTracker()
+        bankroll.sync_from_api = MagicMock()
+        handler = _make_handler(bankroll_tracker=bankroll)
+
+        order_mgr = FakePaperOrderManager(balance=1000.0)
+        order_mgr._current_record = FakePaperRecord(pnl=0.0, entry_price=0.0, filled=False)
+
+        strategy = FakeStrategy()
+        strategy._fired = True
+
+        handler._process_trade_outcome(
+            strategy,
+            order_mgr,
+            FakeDecayDetector(),
+            last_window_ts=1000,
+        )
+
+        bankroll.sync_from_api.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_live_mode_does_not_trigger_paper_reconcile(self):
+        """The per-settle reconcile is paper-only — live keeps the separate
+        throttled sync path.
+        """
+        bankroll = FakeBankrollTracker()
+        bankroll.sync_from_api = MagicMock()
+        state = FakeMarketState()
+        state.live_fills = {}  # no fill → _has_resolved_outcome is False anyway
+        handler = _make_handler(bankroll_tracker=bankroll, state=state)
+
+        order_mgr = FakeOrderManager(mode="live")
+
+        strategy = FakeStrategy()
+        strategy._fired = True
+        strategy._order_placed = True
+
+        handler._process_trade_outcome(
+            strategy,
+            order_mgr,
+            FakeDecayDetector(),
+            last_window_ts=1000,
+        )
+
+        bankroll.sync_from_api.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # Trade outcome: live mode
 # ---------------------------------------------------------------------------
 

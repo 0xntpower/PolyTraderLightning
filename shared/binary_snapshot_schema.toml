@@ -1,0 +1,105 @@
+# Binary snapshot schema — single source of truth for the hot-path wire
+# format between PolyTraderLightning (Python publisher) and PolyLiveVisualizer
+# (C++ client).
+#
+# Bumping ``schema_version`` is a breaking change: incompatible publishers
+# and clients refuse each other's frames with a loud log on the visualizer
+# side. Add new fields only by bumping the version.
+#
+# Type vocabulary:
+#   u8  i8  u16 i16 u32 i32 u64 i64 f32 f64
+# ``bool`` is encoded as u8 (0 / 1). All fields are packed without padding
+# (``<`` in Python ``struct``, ``#pragma pack(push, 1)`` in C++).
+
+schema_version = 3
+endianness = "little"
+
+# ---- Header -----------------------------------------------------------
+# Stays first so the version byte is always at offset 0 and a schema
+# mismatch is caught before anything else is parsed.
+fields = [
+    { name = "version",             type = "u8",  group = "header",        doc = "Schema version — must match kBinarySchemaVersion" },
+    { name = "has_cold_dirty",      type = "u8",  group = "header",        doc = "1 if a cold JSON frame is being sent alongside this binary frame" },
+    { name = "direction_code",      type = "u8",  group = "header",        doc = "0=none, 1=up, 2=down" },
+    { name = "halted",              type = "u8",  group = "header" },
+    { name = "has_last_resolution", type = "u8",  group = "header" },
+    { name = "feeds_agree",         type = "u8",  group = "header" },
+    { name = "fired_this_window",   type = "u8",  group = "header" },
+    { name = "has_edge",            type = "u8",  group = "header" },
+    { name = "warmup_active",       type = "u8",  group = "header" },
+    { name = "regime_ready",        type = "u8",  group = "header" },
+    { name = "last_bet_won",        type = "u8",  group = "header" },
+    { name = "pad_hdr_0",           type = "u8",  group = "header",        doc = "Reserved; keep at 0" },
+    { name = "seq",                 type = "u64", group = "header",        doc = "Monotonic publisher frame counter" },
+    { name = "ts_ms",               type = "u64", group = "header",        doc = "Unix milliseconds when frame was built" },
+
+    # ---- Market ------------------------------------------------------
+    { name = "btc_binance",         type = "f64", group = "market" },
+    { name = "btc_chainlink",       type = "f64", group = "market" },
+    { name = "binance_obi",         type = "f64", group = "market" },
+    { name = "window_open_price",   type = "f64", group = "market" },
+    { name = "time_remaining",      type = "f64", group = "market" },
+    { name = "best_bid_up",         type = "f64", group = "market" },
+    { name = "best_ask_up",         type = "f64", group = "market" },
+    { name = "best_bid_down",       type = "f64", group = "market" },
+    { name = "best_ask_down",       type = "f64", group = "market" },
+    { name = "window_ts",           type = "i32", group = "market" },
+
+    # ---- Signal live -------------------------------------------------
+    { name = "delta_pct",                   type = "f64", group = "signal_live" },
+    { name = "poly_implied_up_prob",        type = "f64", group = "signal_live" },
+    { name = "bn_direction_from_open_pct",  type = "f64", group = "signal_live" },
+    { name = "cl_direction_from_open_pct",  type = "f64", group = "signal_live" },
+    { name = "poly_spread_up",              type = "f64", group = "signal_live" },
+    { name = "poly_spread_down",            type = "f64", group = "signal_live" },
+    { name = "delta_bn_cl_pct",             type = "f64", group = "signal_live" },
+
+    # ---- Feeds -------------------------------------------------------
+    { name = "binance_age_s",       type = "f64", group = "feeds" },
+    { name = "chainlink_age_s",     type = "f64", group = "feeds" },
+    { name = "clob_age_s",          type = "f64", group = "feeds" },
+
+    # ---- Lifecycle ---------------------------------------------------
+    { name = "signal_age_windows",        type = "i32", group = "lifecycle" },
+    { name = "windows_since_last_fire",   type = "i32", group = "lifecycle" },
+
+    # ---- SPRT --------------------------------------------------------
+    { name = "llr",                 type = "f64", group = "sprt" },
+    { name = "boundary_alive",      type = "f64", group = "sprt" },
+    { name = "boundary_dead",       type = "f64", group = "sprt" },
+    { name = "rolling_win_rate",    type = "f64", group = "sprt" },
+    { name = "p_alive",             type = "f64", group = "sprt" },
+    { name = "p_dead",              type = "f64", group = "sprt" },
+    { name = "sprt_n_trades",       type = "i32", group = "sprt" },
+    { name = "sprt_n_wins",         type = "i32", group = "sprt" },
+
+    # ---- Kelly -------------------------------------------------------
+    { name = "adjusted_p",          type = "f64", group = "kelly" },
+    { name = "raw_kelly",           type = "f64", group = "kelly" },
+    { name = "fractional_kelly",    type = "f64", group = "kelly" },
+    { name = "bet_size",            type = "f64", group = "kelly" },
+    { name = "implied_ev",          type = "f64", group = "kelly" },
+    { name = "vol_discount",        type = "f64", group = "kelly" },
+    { name = "chop_discount",       type = "f64", group = "kelly" },
+    { name = "outcome_discount",    type = "f64", group = "kelly" },
+    { name = "total_discount",      type = "f64", group = "kelly" },
+    { name = "feedback_adjustment", type = "f64", group = "kelly" },
+    { name = "bankroll",            type = "f64", group = "kelly" },
+    { name = "sprt_factor",         type = "f64", group = "kelly" },
+
+    # ---- Regime ------------------------------------------------------
+    { name = "vol_stddev_pct",      type = "f64", group = "regime" },
+    { name = "chop_avg_flips",      type = "f64", group = "regime" },
+
+    # ---- Performance -------------------------------------------------
+    { name = "daily_pnl",           type = "f64", group = "performance" },
+    { name = "total_pnl",           type = "f64", group = "performance" },
+    { name = "win_rate_pct",        type = "f64", group = "performance" },
+    { name = "windows_traded",      type = "i32", group = "performance" },
+    { name = "windows_won",         type = "i32", group = "performance" },
+    { name = "consecutive_losses",  type = "i32", group = "performance" },
+
+    # ---- Last resolution --------------------------------------------
+    { name = "last_bet_pnl",        type = "f64", group = "last_resolution" },
+    { name = "last_bet_window_ts",  type = "i32", group = "last_resolution" },
+]

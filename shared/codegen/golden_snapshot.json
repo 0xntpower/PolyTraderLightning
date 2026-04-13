@@ -1,0 +1,337 @@
+{
+  "schema_version": 3,
+  "total_size": 408,
+  "struct_format": "<BBBBBBBBBBBBQQdddddddddiddddddddddiiddddddiidddddddddddddddddiiidi",
+  "fields": [
+    {
+      "name": "version",
+      "type": "u8",
+      "value": 3
+    },
+    {
+      "name": "has_cold_dirty",
+      "type": "u8",
+      "value": 4
+    },
+    {
+      "name": "direction_code",
+      "type": "u8",
+      "value": 7
+    },
+    {
+      "name": "halted",
+      "type": "u8",
+      "value": 10
+    },
+    {
+      "name": "has_last_resolution",
+      "type": "u8",
+      "value": 13
+    },
+    {
+      "name": "feeds_agree",
+      "type": "u8",
+      "value": 16
+    },
+    {
+      "name": "fired_this_window",
+      "type": "u8",
+      "value": 19
+    },
+    {
+      "name": "has_edge",
+      "type": "u8",
+      "value": 22
+    },
+    {
+      "name": "warmup_active",
+      "type": "u8",
+      "value": 25
+    },
+    {
+      "name": "regime_ready",
+      "type": "u8",
+      "value": 28
+    },
+    {
+      "name": "last_bet_won",
+      "type": "u8",
+      "value": 31
+    },
+    {
+      "name": "pad_hdr_0",
+      "type": "u8",
+      "value": 34
+    },
+    {
+      "name": "seq",
+      "type": "u64",
+      "value": 37
+    },
+    {
+      "name": "ts_ms",
+      "type": "u64",
+      "value": 40
+    },
+    {
+      "name": "btc_binance",
+      "type": "f64",
+      "value": 21.25
+    },
+    {
+      "name": "btc_chainlink",
+      "type": "f64",
+      "value": 22.75
+    },
+    {
+      "name": "binance_obi",
+      "type": "f64",
+      "value": 24.25
+    },
+    {
+      "name": "window_open_price",
+      "type": "f64",
+      "value": 25.75
+    },
+    {
+      "name": "time_remaining",
+      "type": "f64",
+      "value": 27.25
+    },
+    {
+      "name": "best_bid_up",
+      "type": "f64",
+      "value": 28.75
+    },
+    {
+      "name": "best_ask_up",
+      "type": "f64",
+      "value": 30.25
+    },
+    {
+      "name": "best_bid_down",
+      "type": "f64",
+      "value": 31.75
+    },
+    {
+      "name": "best_ask_down",
+      "type": "f64",
+      "value": 33.25
+    },
+    {
+      "name": "window_ts",
+      "type": "i32",
+      "value": 70
+    },
+    {
+      "name": "delta_pct",
+      "type": "f64",
+      "value": 36.25
+    },
+    {
+      "name": "poly_implied_up_prob",
+      "type": "f64",
+      "value": 37.75
+    },
+    {
+      "name": "bn_direction_from_open_pct",
+      "type": "f64",
+      "value": 39.25
+    },
+    {
+      "name": "cl_direction_from_open_pct",
+      "type": "f64",
+      "value": 40.75
+    },
+    {
+      "name": "poly_spread_up",
+      "type": "f64",
+      "value": 42.25
+    },
+    {
+      "name": "poly_spread_down",
+      "type": "f64",
+      "value": 43.75
+    },
+    {
+      "name": "delta_bn_cl_pct",
+      "type": "f64",
+      "value": 45.25
+    },
+    {
+      "name": "binance_age_s",
+      "type": "f64",
+      "value": 46.75
+    },
+    {
+      "name": "chainlink_age_s",
+      "type": "f64",
+      "value": 48.25
+    },
+    {
+      "name": "clob_age_s",
+      "type": "f64",
+      "value": 49.75
+    },
+    {
+      "name": "signal_age_windows",
+      "type": "i32",
+      "value": 103
+    },
+    {
+      "name": "windows_since_last_fire",
+      "type": "i32",
+      "value": 106
+    },
+    {
+      "name": "llr",
+      "type": "f64",
+      "value": 54.25
+    },
+    {
+      "name": "boundary_alive",
+      "type": "f64",
+      "value": 55.75
+    },
+    {
+      "name": "boundary_dead",
+      "type": "f64",
+      "value": 57.25
+    },
+    {
+      "name": "rolling_win_rate",
+      "type": "f64",
+      "value": 58.75
+    },
+    {
+      "name": "p_alive",
+      "type": "f64",
+      "value": 60.25
+    },
+    {
+      "name": "p_dead",
+      "type": "f64",
+      "value": 61.75
+    },
+    {
+      "name": "sprt_n_trades",
+      "type": "i32",
+      "value": 127
+    },
+    {
+      "name": "sprt_n_wins",
+      "type": "i32",
+      "value": 130
+    },
+    {
+      "name": "adjusted_p",
+      "type": "f64",
+      "value": 66.25
+    },
+    {
+      "name": "raw_kelly",
+      "type": "f64",
+      "value": 67.75
+    },
+    {
+      "name": "fractional_kelly",
+      "type": "f64",
+      "value": 69.25
+    },
+    {
+      "name": "bet_size",
+      "type": "f64",
+      "value": 70.75
+    },
+    {
+      "name": "implied_ev",
+      "type": "f64",
+      "value": 72.25
+    },
+    {
+      "name": "vol_discount",
+      "type": "f64",
+      "value": 73.75
+    },
+    {
+      "name": "chop_discount",
+      "type": "f64",
+      "value": 75.25
+    },
+    {
+      "name": "outcome_discount",
+      "type": "f64",
+      "value": 76.75
+    },
+    {
+      "name": "total_discount",
+      "type": "f64",
+      "value": 78.25
+    },
+    {
+      "name": "feedback_adjustment",
+      "type": "f64",
+      "value": 79.75
+    },
+    {
+      "name": "bankroll",
+      "type": "f64",
+      "value": 81.25
+    },
+    {
+      "name": "sprt_factor",
+      "type": "f64",
+      "value": 82.75
+    },
+    {
+      "name": "vol_stddev_pct",
+      "type": "f64",
+      "value": 84.25
+    },
+    {
+      "name": "chop_avg_flips",
+      "type": "f64",
+      "value": 85.75
+    },
+    {
+      "name": "daily_pnl",
+      "type": "f64",
+      "value": 87.25
+    },
+    {
+      "name": "total_pnl",
+      "type": "f64",
+      "value": 88.75
+    },
+    {
+      "name": "win_rate_pct",
+      "type": "f64",
+      "value": 90.25
+    },
+    {
+      "name": "windows_traded",
+      "type": "i32",
+      "value": 184
+    },
+    {
+      "name": "windows_won",
+      "type": "i32",
+      "value": 187
+    },
+    {
+      "name": "consecutive_losses",
+      "type": "i32",
+      "value": 190
+    },
+    {
+      "name": "last_bet_pnl",
+      "type": "f64",
+      "value": 96.25
+    },
+    {
+      "name": "last_bet_window_ts",
+      "type": "i32",
+      "value": 196
+    }
+  ]
+}

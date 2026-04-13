@@ -1023,10 +1023,22 @@ async def _strategy_loop(
                 gc.collect()
                 gc_disabled = False
 
-            # Publish state snapshot for visualizer (fast — microseconds)
+            # Publish state snapshot for visualizer (fast — microseconds).
+            # Hot binary frame every tick; cold JSON only when dirty (or
+            # heartbeat). We build the cold dict and offer it to the
+            # publisher first so the resulting "dirty" flag can be stamped
+            # into the hot frame on the same wake-up.
             if state_publisher is not None:
                 _live_sig = compute_signal(state) if state.btc_chainlink > 0 else None
-                _pub_snapshot = StatePublisher.build_snapshot(
+                _cold_snap = StatePublisher.build_cold_snapshot(
+                    signal_cfg=rules_strategy.signal_cfg,
+                    idle_reason=lifecycle.idle_reason,
+                    decay_verdict=decay_detector.state.verdict,
+                    outcome_summary=outcome_tracker.summary(),
+                    halt_reason=risk.halt_reason,
+                )
+                _cold_dirty = state_publisher.publish_cold_if_dirty(_cold_snap, now)
+                _hot_snap = StatePublisher.build_hot_snapshot(
                     btc_binance=state.btc_binance,
                     btc_chainlink=state.btc_chainlink,
                     binance_obi=state.binance_obi,
@@ -1038,11 +1050,9 @@ async def _strategy_loop(
                     best_bid_down=state.best_bid_down,
                     best_ask_down=state.best_ask_down,
                     signal=_live_sig,
-                    signal_cfg=rules_strategy.signal_cfg,
                     signal_age_windows=lifecycle.signal_age_windows,
                     windows_since_last_fire=lifecycle.windows_since_last_fire,
                     fired_this_window=rules_strategy.fired,
-                    idle_reason=lifecycle.idle_reason,
                     decay_state=decay_detector.state,
                     kelly_result=rules_strategy.last_kelly_result,
                     wr_result=rules_strategy.kelly_wr_result,
@@ -1051,7 +1061,6 @@ async def _strategy_loop(
                     warmup_active=rules_strategy.warmup_active,
                     vol_stddev_pct=vol_tracker.current_stddev_pct,
                     chop_avg_flips=chop_detector.avg_flips,
-                    outcome_summary=outcome_tracker.summary(),
                     regime_ready=vol_tracker.n_returns >= 6,
                     daily_pnl=position_tracker.daily_pnl,
                     total_pnl=position_tracker.total_pnl,
@@ -1059,13 +1068,13 @@ async def _strategy_loop(
                     windows_won=position_tracker.windows_won,
                     consecutive_losses=position_tracker.consecutive_losses,
                     halted=risk.halted,
-                    halt_reason=risk.halt_reason,
                     last_resolution=resolution_mgr.last_result,
                     last_binance_msg_ts=state.last_binance_msg_ts,
                     last_chainlink_msg_ts=state.last_chainlink_msg_ts,
                     last_clob_market_msg_ts=state.last_clob_market_msg_ts,
+                    has_cold_dirty=_cold_dirty,
                 )
-                state_publisher.publish(_pub_snapshot)
+                state_publisher.publish_binary(_hot_snap)
 
             if risk.halted:
                 if now - last_status_log >= STATUS_LOG_INTERVAL:

@@ -818,6 +818,226 @@ class TestCusumSuppression:
 
 
 # ---------------------------------------------------------------------------
+# v3.0 P1 — CUSUM delta-reversal gate
+# ---------------------------------------------------------------------------
+
+
+class TestCusumReversalGate:
+    """The v3.0 reversal gate suppresses CUSUM exits when the live BTC
+    delta has not actually reversed far enough from the fire delta. v2.9
+    had 4/6 CUSUM exits fire while |current - fire| <= 0.14pp (premature
+    exits on noise); both valid exits had reversal >= 0.16pp.
+    """
+
+    @staticmethod
+    def _sustained_primed(
+        *,
+        best_bid_up: float = 0.20,
+        min_reversal_pp: float = 0.15,
+    ) -> tuple[MomentumSignalStrategy, _FakeErosionOrderMgr]:
+        """Build a strategy where sustain has elapsed so the reversal gate
+        is the next check on any tick that keeps the CUSUM breached."""
+        strategy, order_mgr = _prime_erosion_state(best_bid_up=best_bid_up)
+        strategy.erosion_cfg = ErosionConfig(cusum_min_reversal_pp=min_reversal_pp)
+        # Pre-expire the sustain timer so the reversal check runs first.
+        strategy._cusum_breach_started_at = 0.0
+        # Push the CUSUM well above the limit so even a decayed tick stays
+        # over the limit and we reach the reversal gate.
+        strategy._erosion_cusum = 5.0
+        return strategy, order_mgr
+
+    @pytest.mark.asyncio
+    async def test_shallow_reversal_suppresses_exit(self, monkeypatch):
+        """|current - fire| < min_reversal_pp → exit blocked."""
+        strategy, order_mgr = self._sustained_primed()
+        clock = _Clock(start=1000.0)
+        _patch_erosion_env(monkeypatch, clock)
+
+        # fire_delta = 1.0 (pp). current_pct = 0.0095 * 100 = 0.95 pp.
+        # reversal = |0.95 - 1.0| = 0.05 pp — below default gate of 0.15 pp.
+        sig = _make_signal(bn_direction_from_open_pct=0.0095)
+        await strategy._monitor_post_fire_erosion(sig, order_mgr)
+
+        assert not strategy._early_exit_triggered
+        assert order_mgr.exit_calls == []
+
+    @pytest.mark.asyncio
+    async def test_deep_reversal_allows_exit(self, monkeypatch):
+        """|current - fire| >= min_reversal_pp → exit proceeds."""
+        strategy, order_mgr = self._sustained_primed()
+        clock = _Clock(start=1000.0)
+        _patch_erosion_env(monkeypatch, clock)
+
+        # bn=0.0 → current_pct=0 → reversal = |0 - 1.0| = 1.0 pp >> 0.15
+        sig = _make_signal(bn_direction_from_open_pct=0.0)
+        await strategy._monitor_post_fire_erosion(sig, order_mgr)
+
+        assert strategy._early_exit_triggered
+        assert len(order_mgr.exit_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_reversal_just_above_threshold_allows_exit(self, monkeypatch):
+        """Reversal just above min_reversal_pp clears the strict-less-than
+        gate and the exit proceeds."""
+        strategy, order_mgr = self._sustained_primed(min_reversal_pp=0.15)
+        clock = _Clock(start=1000.0)
+        _patch_erosion_env(monkeypatch, clock)
+
+        # current = 0.0084 * 100 = 0.84 pp → reversal = 0.16 pp > 0.15
+        sig = _make_signal(bn_direction_from_open_pct=0.0084)
+        await strategy._monitor_post_fire_erosion(sig, order_mgr)
+
+        assert strategy._early_exit_triggered
+        assert len(order_mgr.exit_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_gate_disabled_with_zero(self, monkeypatch):
+        """cusum_min_reversal_pp=0 disables the gate — shallow reversal still exits."""
+        strategy, order_mgr = self._sustained_primed(min_reversal_pp=0.0)
+        clock = _Clock(start=1000.0)
+        _patch_erosion_env(monkeypatch, clock)
+
+        # Would normally be blocked (reversal = 0.05 pp) but the gate is off.
+        sig = _make_signal(bn_direction_from_open_pct=0.0095)
+        await strategy._monitor_post_fire_erosion(sig, order_mgr)
+
+        assert strategy._early_exit_triggered
+        assert len(order_mgr.exit_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# v3.0 P6 — hostile-regime double cap
+# ---------------------------------------------------------------------------
+
+
+class TestHostileRegimeCap:
+    """When vol_discount or chop_discount exceeds hostile_regime_threshold,
+    the final Kelly bet is scaled by hostile_regime_multiplier on top of
+    the regime cap. Applied once inside the sizing block before SPRT.
+    """
+
+    @staticmethod
+    def _build(
+        *,
+        vol_discount: float = 0.0,
+        chop_discount: float = 0.0,
+        hostile_threshold: float = 0.20,
+        hostile_multiplier: float = 0.5,
+    ) -> tuple[MomentumSignalStrategy, FakeOrderExecutor]:
+        strategy, executor = _make_strategy(
+            side=Direction.UP,
+            min_delta_pct=0.05,
+            max_variance_pct=1.0,
+            observe_from_s=240.0,
+            observe_to_s=180.0,
+        )
+        strategy.kelly_wr_result = AdjustedWinRateResult(
+            adjusted_p=0.88,
+            vol_discount=vol_discount,
+            chop_discount=chop_discount,
+            outcome_discount=0,
+            total_discount=0,
+            feedback_adjustment=0,
+            regime_ready=True,
+        )
+        strategy.sizing_cfg = SizingConfig(
+            hostile_regime_threshold=hostile_threshold,
+            hostile_regime_multiplier=hostile_multiplier,
+        )
+        strategy.erosion_cfg = ErosionConfig()
+        strategy.bankroll = 1000.0
+        return strategy, executor
+
+    @pytest.mark.asyncio
+    async def test_benign_regime_leaves_bet_unchanged(self):
+        strategy, executor = self._build(vol_discount=0.05, chop_discount=0.05)
+        await _run_fire(strategy, executor)
+
+        assert strategy._fired
+        assert strategy.last_kelly_result is not None
+        # Bet size matches the raw Kelly (no hostile cap, no multiplier).
+        # Compare to fractional Kelly clamped by min/max bet. We only need
+        # to assert the hostile code path did NOT multiply.
+        assert len(executor.calls) == 1
+        ordered = executor.calls[0].size_usd
+        # With adjusted_p=0.88 and entry ~0.85 bankroll=1000, the Kelly bet
+        # lands in the mid two-digit dollar range. What matters is it's
+        # *not* been halved — so above 1.5x the minimum bet floor.
+        assert ordered > strategy.sizing_cfg.kelly_min_bet * 1.5
+
+    @pytest.mark.asyncio
+    async def test_vol_above_threshold_halves_bet(self):
+        benign_strat, benign_exec = self._build(vol_discount=0.05)
+        await _run_fire(benign_strat, benign_exec)
+        assert len(benign_exec.calls) == 1
+        benign_size = benign_exec.calls[0].size_usd
+
+        hostile_strat, hostile_exec = self._build(vol_discount=0.35)
+        await _run_fire(hostile_strat, hostile_exec)
+        assert len(hostile_exec.calls) == 1
+        hostile_size = hostile_exec.calls[0].size_usd
+
+        # Hostile size must be strictly smaller; ratio ~0.5 (within rounding
+        # caused by the min-bet floor and the $0.01 round in size_usd).
+        assert hostile_size < benign_size
+        assert hostile_size == pytest.approx(benign_size * 0.5, rel=0.02)
+
+    @pytest.mark.asyncio
+    async def test_chop_above_threshold_halves_bet(self):
+        """chop_discount drives the cap identically to vol_discount."""
+        benign_strat, benign_exec = self._build(chop_discount=0.05)
+        await _run_fire(benign_strat, benign_exec)
+        benign_size = benign_exec.calls[0].size_usd
+
+        hostile_strat, hostile_exec = self._build(chop_discount=0.30)
+        await _run_fire(hostile_strat, hostile_exec)
+        hostile_size = hostile_exec.calls[0].size_usd
+
+        assert hostile_size == pytest.approx(benign_size * 0.5, rel=0.02)
+
+    @pytest.mark.asyncio
+    async def test_max_metric_wins_between_vol_and_chop(self):
+        """The gate uses max(vol, chop); either one above the threshold trips it."""
+        # vol benign, chop hostile → still triggers.
+        strategy, executor = self._build(vol_discount=0.05, chop_discount=0.40)
+        await _run_fire(strategy, executor)
+        assert strategy.last_kelly_result is not None
+
+        benign, benign_exec = self._build(vol_discount=0.05, chop_discount=0.05)
+        await _run_fire(benign, benign_exec)
+        assert executor.calls[0].size_usd == pytest.approx(
+            benign_exec.calls[0].size_usd * 0.5, rel=0.02
+        )
+
+    @pytest.mark.asyncio
+    async def test_threshold_exactly_equal_does_not_trip(self):
+        """The check is strictly greater-than, so equality stays benign."""
+        at_threshold, at_exec = self._build(vol_discount=0.20, hostile_threshold=0.20)
+        benign, benign_exec = self._build(vol_discount=0.05)
+        await _run_fire(at_threshold, at_exec)
+        await _run_fire(benign, benign_exec)
+
+        # Same bet size when strictly-greater-than gate is not tripped.
+        assert at_exec.calls[0].size_usd == pytest.approx(benign_exec.calls[0].size_usd)
+
+    @pytest.mark.asyncio
+    async def test_custom_multiplier_applies(self):
+        """A non-default multiplier (e.g. 0.25) also composes correctly."""
+        benign_strat, benign_exec = self._build(vol_discount=0.05)
+        await _run_fire(benign_strat, benign_exec)
+        benign_size = benign_exec.calls[0].size_usd
+
+        hostile_strat, hostile_exec = self._build(
+            vol_discount=0.35,
+            hostile_multiplier=0.25,
+        )
+        await _run_fire(hostile_strat, hostile_exec)
+        hostile_size = hostile_exec.calls[0].size_usd
+
+        assert hostile_size == pytest.approx(benign_size * 0.25, rel=0.03)
+
+
+# ---------------------------------------------------------------------------
 # Maker monitoring tests
 # ---------------------------------------------------------------------------
 

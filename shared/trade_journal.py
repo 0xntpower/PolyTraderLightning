@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
+from collections import deque
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -35,16 +37,64 @@ class TradeRecord:
     signal_age_windows: int
 
 
+@dataclass(frozen=True, slots=True)
+class RecentFire:
+    signal_id: str
+    source: str
+    won: bool
+    timestamp: str
+
+
+class RecentFireMailbox:
+    """Thread-safe ring buffer of recently resolved fires.
+
+    Mirrors the fire-and-forget pattern used by ``StatePublisher`` and the
+    Discord sender: the strategy loop pushes every resolved fire into this
+    in-memory buffer, and the IPC ``status_query`` handler (which runs on
+    a background thread) reads a snapshot without touching the disk.
+
+    The bounded deque never allocates beyond ``maxlen`` and is guarded by
+    a single lock, so ``record`` and ``snapshot`` are O(maxlen) and cannot
+    block the asyncio hot path on file I/O.
+    """
+
+    def __init__(self, maxlen: int = 64) -> None:
+        self._deque: deque[RecentFire] = deque(maxlen=maxlen)
+        self._lock = threading.Lock()
+
+    def record(self, fire: RecentFire) -> None:
+        with self._lock:
+            self._deque.append(fire)
+
+    def snapshot(self, *, source: str, limit: int) -> list[RecentFire]:
+        if limit <= 0:
+            return []
+        with self._lock:
+            items = list(self._deque)
+        matching = [f for f in items if f.source == source]
+        return matching[-limit:]
+
+
 class TradeJournal:
     """Persistent JSONL journal for trade outcomes."""
 
-    def __init__(self, path: Path | str = _DEFAULT_JOURNAL_PATH) -> None:
+    def __init__(
+        self,
+        path: Path | str = _DEFAULT_JOURNAL_PATH,
+        *,
+        fire_mailbox: RecentFireMailbox | None = None,
+    ) -> None:
         self._path = Path(path)
+        self._fire_mailbox = fire_mailbox
 
     def record_trade(self, record: TradeRecord) -> bool:
         """Append a single trade record. Creates the directory on first write.
 
-        Returns True on success, False on failure.
+        Returns True on success, False on failure. When a ``RecentFireMailbox``
+        was supplied to ``__init__`` and the record represents a resolved fire
+        (``fired=True`` and ``won is not None``), the in-memory mailbox is
+        updated so the IPC status handler can answer queries without rereading
+        the file from disk.
         """
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
@@ -53,10 +103,20 @@ class TradeJournal:
                 f.write(line)
                 f.flush()
                 os.fsync(f.fileno())
-            return True
         except OSError:
             log.exception("trade journal write failed")
             return False
+
+        if self._fire_mailbox is not None and record.fired and record.won is not None:
+            self._fire_mailbox.record(
+                RecentFire(
+                    signal_id=record.signal_id,
+                    source=record.source,
+                    won=record.won,
+                    timestamp=record.timestamp,
+                )
+            )
+        return True
 
     def read_trades(
         self,
@@ -103,47 +163,6 @@ class TradeJournal:
             log.exception("trade journal read failed")
 
         return records
-
-    def recent_resolved_fires(self, limit: int, source: str) -> list[TradeRecord]:
-        """Return the most-recent ``limit`` resolved fires for a given source.
-
-        Only records where ``source`` matches, ``fired`` is true, and ``won``
-        has been decided (not None) are returned. Ordered oldest-first within
-        the returned slice so callers can compute rolling win rate directly.
-
-        Used by the orchestrator status_query feedback path (v3.0 P5): the
-        bot passes its own current mode ("paper" or "live") so the dedupe
-        feedback loop works in both paper validation sessions and live runs.
-        """
-        if limit <= 0 or not self._path.exists():
-            return []
-
-        records: list[TradeRecord] = []
-        try:
-            with open(self._path, encoding="utf-8") as f:
-                for raw_line in f:
-                    line = raw_line.strip()
-                    if not line:
-                        continue
-                    try:
-                        data = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if data.get("source") != source:
-                        continue
-                    if not data.get("fired"):
-                        continue
-                    if data.get("won") is None:
-                        continue
-                    try:
-                        records.append(TradeRecord(**data))
-                    except (TypeError, KeyError):
-                        continue
-        except OSError:
-            log.exception("trade journal read failed")
-            return []
-
-        return records[-limit:]
 
     @staticmethod
     def now_iso() -> str:

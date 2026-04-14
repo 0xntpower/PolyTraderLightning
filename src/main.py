@@ -794,37 +794,54 @@ async def _strategy_loop(
     _LATENCY_REPORT_INTERVAL = 3600.0  # noqa: N806  # constant defined in function scope
     _last_latency_report = time.time()
 
-    # Live mode: sync bankroll from on-chain balance before trading.
-    # Symmetric to paper's BANKROLL_STARTUP_DRIFT check in window_handler.py
-    # — surface large drift at WARNING so stale bankroll.json state is
-    # visible at boot instead of only showing up in sync_from_api's INFO line.
+    # v3.0: reconcile Kelly bankroll with the authoritative balance BEFORE the
+    # strategy loop starts. Paper mode's authoritative source is
+    # PaperOrderManager.balance (resumed from state.json). Live mode's
+    # authoritative source is the on-chain USDC balance from the CLOB API. In
+    # both modes, the cached bankroll.json can drift from the authoritative
+    # source across session boundaries — v2.9 paper showed a $28 startup drift
+    # that only got healed after the first window opened. Reconciling here,
+    # before any fire decisions, eliminates the window where Kelly sizes off a
+    # stale base.
+    _startup_authoritative: float | None = None
+    _startup_source: str | None = None
     if order_mgr.mode == "live" and isinstance(order_mgr, OrderManager):
         _api_bal = await order_mgr.refresh_balance()
         if _api_bal is not None and _api_bal > 0:
-            _local_bal = bankroll_tracker.bankroll
-            _drift = _api_bal - _local_bal
-            if abs(_drift) > 1.0:
-                log.warning(
-                    "BANKROLL_STARTUP_DRIFT kelly_br=$%.2f onchain_br=$%.2f drift=%+.2f "
-                    "— stale bankroll.json, reconciling to on-chain balance",
-                    _local_bal,
-                    _api_bal,
-                    _drift,
-                )
-            else:
-                log.info(
-                    "bankroll startup check: kelly_br=$%.2f onchain_br=$%.2f drift=%+.2f OK",
-                    _local_bal,
-                    _api_bal,
-                    _drift,
-                )
-            bankroll_tracker.sync_from_api(_api_bal)
-            window_handler._last_bankroll_sync = time.time()
+            _startup_authoritative = _api_bal
+            _startup_source = "onchain"
         else:
             log.warning(
                 "could not fetch on-chain balance at startup — using cached bankroll $%.2f",
                 bankroll_tracker.bankroll,
             )
+    elif isinstance(order_mgr, PaperOrderManager):
+        _startup_authoritative = order_mgr.balance
+        _startup_source = "paper"
+
+    if _startup_authoritative is not None and _startup_source is not None:
+        _local_bal = bankroll_tracker.bankroll
+        _drift = _startup_authoritative - _local_bal
+        if abs(_drift) > 1.0:
+            log.warning(
+                "BANKROLL_STARTUP_DRIFT kelly_br=$%.2f %s_br=$%.2f drift=%+.2f "
+                "— stale bankroll.json, reconciling to %s balance",
+                _local_bal,
+                _startup_source,
+                _startup_authoritative,
+                _drift,
+                _startup_source,
+            )
+        else:
+            log.info(
+                "bankroll startup check: kelly_br=$%.2f %s_br=$%.2f drift=%+.2f OK",
+                _local_bal,
+                _startup_source,
+                _startup_authoritative,
+                _drift,
+            )
+        bankroll_tracker.sync_from_api(_startup_authoritative)
+        window_handler._last_bankroll_sync = time.time()
 
     while True:
         try:
@@ -1191,7 +1208,32 @@ async def run(signal_path_override: str | None = None, standalone: bool = False)
             )
             pending_signal_mgr.set_pending(signal_data, summary_file)
 
-        ipc_server = SignalServer(_on_signal, host=cfg.ipc.host, port=cfg.ipc.port)
+        # v3.0 signal-identity dedupe feedback: the orchestrator pulls the
+        # most-recent live fire outcomes over the same authenticated channel.
+        # A fresh TradeJournal reader is cheap (it's a Path wrapper) and
+        # keeps this decoupled from the strategy loop's writer.
+        _status_journal = TradeJournal(paths.journal)
+
+        def _status_provider() -> dict[str, Any]:
+            fires = _status_journal.recent_live_fires(limit=20)
+            return {
+                "recent_fires": [
+                    {
+                        "signal_id": r.signal_id,
+                        "won": bool(r.won),
+                        "timestamp": r.timestamp,
+                    }
+                    for r in fires
+                    if r.won is not None
+                ],
+            }
+
+        ipc_server = SignalServer(
+            _on_signal,
+            host=cfg.ipc.host,
+            port=cfg.ipc.port,
+            status_provider=_status_provider,
+        )
         ipc_server.start()
 
     # Visualizer state publisher (disabled via ipc.visualizer_enabled=false)

@@ -104,6 +104,47 @@ class TradeJournal:
 
         return records
 
+    def recent_live_fires(self, limit: int) -> list[TradeRecord]:
+        """Return the most-recent `limit` live fires that actually resolved.
+
+        Only records where ``source == "live"``, ``fired`` is true, and ``won``
+        has been decided (not None) are returned. Ordered oldest-first within
+        the returned slice so callers can compute rolling win-rate directly.
+
+        Used by the orchestrator status_query feedback path: the orchestrator
+        pulls the last N live resolutions to detect stale top-ranked rules
+        whose live win rate has decayed.
+        """
+        if limit <= 0 or not self._path.exists():
+            return []
+
+        records: list[TradeRecord] = []
+        try:
+            with open(self._path, encoding="utf-8") as f:
+                for raw_line in f:
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    try:
+                        data = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if data.get("source") != "live":
+                        continue
+                    if not data.get("fired"):
+                        continue
+                    if data.get("won") is None:
+                        continue
+                    try:
+                        records.append(TradeRecord(**data))
+                    except (TypeError, KeyError):
+                        continue
+        except OSError:
+            log.exception("trade journal read failed")
+            return []
+
+        return records[-limit:]
+
     @staticmethod
     def now_iso() -> str:
         return datetime.now(UTC).isoformat()

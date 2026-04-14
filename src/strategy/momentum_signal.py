@@ -383,6 +383,29 @@ class MomentumSignalStrategy:
                 )
                 return
 
+            # v3.0 delta-reversal gate: require the live delta to have
+            # reversed by at least cusum_min_reversal_pp vs fire_delta before
+            # an exit is allowed. In the v2.9 session, 4 of 6 CUSUM exits
+            # were premature: every one had |current - fire| <= 0.14 pp,
+            # while both valid exits had >= 0.16 pp. This gate preserves the
+            # valid saves (e.g. v2.9 fire #14, reversal 0.32 pp) and blocks
+            # the false ones (#4/#7/#8/#15, reversal <= 0.14 pp).
+            reversal_pp = abs(current_pct - fire_delta)
+            if ecfg.cusum_min_reversal_pp > 0.0 and reversal_pp < ecfg.cusum_min_reversal_pp:
+                log.info(
+                    "EROSION CUSUM SUPPRESSED (reversal too shallow): rank=%d "
+                    "reversal=%.4f%% < min=%.4f%% cusum=%.3f erosion=%.4f "
+                    "fire=%.4f%% current=%.4f%%",
+                    self.signal_cfg.rank,
+                    reversal_pp,
+                    ecfg.cusum_min_reversal_pp,
+                    self._erosion_cusum,
+                    erosion,
+                    fire_delta,
+                    current_pct,
+                )
+                return
+
             # v2.9 price-aware suppression: if the Polymarket top bid on our
             # position's side already reflects a winning outcome, suppress
             # the CUSUM exit regardless of BTC delta erosion. v2.8 Trade 19
@@ -886,6 +909,39 @@ class MomentumSignalStrategy:
                     self.kelly_wr_result.outcome_discount,
                 )
                 return
+
+            # v3.0 P6: double regime cap in hostile conditions. The regime cap
+            # already reduces adjusted_p (and therefore raw Kelly), but when
+            # vol or chop severity is severe we also halve the dollar size to
+            # avoid sizing into a storm. Evaluated once here, applied to
+            # kr.bet_size before SPRT so the multiplier composes cleanly.
+            _hostile_metric = max(
+                self.kelly_wr_result.vol_discount,
+                self.kelly_wr_result.chop_discount,
+            )
+            _hostile_threshold = self.sizing_cfg.hostile_regime_threshold
+            if _hostile_metric > _hostile_threshold:
+                _hostile_mult = self.sizing_cfg.hostile_regime_multiplier
+                _pre = kr.bet_size
+                kr = KellyResult(
+                    raw_kelly=kr.raw_kelly,
+                    fractional_kelly=kr.fractional_kelly,
+                    bet_size=kr.bet_size * _hostile_mult,
+                    has_edge=kr.has_edge,
+                    implied_ev=kr.implied_ev,
+                )
+                self.last_kelly_result = kr
+                log.info(
+                    "HOSTILE REGIME: vol=%.3f chop=%.3f max=%.3f > thresh=%.3f "
+                    "— bet $%.2f -> $%.2f (x%.2f)",
+                    self.kelly_wr_result.vol_discount,
+                    self.kelly_wr_result.chop_discount,
+                    _hostile_metric,
+                    _hostile_threshold,
+                    _pre,
+                    kr.bet_size,
+                    _hostile_mult,
+                )
 
             # Apply SPRT factor on top of Kelly (signal confidence, separate concern)
             size_usd = round(kr.bet_size * self.sprt_factor, 2)

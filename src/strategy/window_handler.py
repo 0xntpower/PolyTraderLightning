@@ -171,13 +171,6 @@ class WindowEventHandler:
         # Mutable state managed by the handler
         self._warmup_alert_sent = False
         self._last_bankroll_sync = 0.0
-        # One-shot session-start drift check. Fix 4's per-trade reconcile
-        # heals ongoing drift, but a stale bankroll.json at resume only gets
-        # corrected after the first settled trade — which can be 30+ minutes
-        # in. This flag makes us surface the startup drift immediately on the
-        # first window after boot. See v2.8 post-mortem: session began with
-        # a $247 Kelly/paper gap that went undetected until the first fire.
-        self._bankroll_drift_checked = False
 
     async def on_window_transition(
         self,
@@ -955,31 +948,8 @@ class WindowEventHandler:
         strategy.sprt_factor = sprt_factor
         strategy.kelly_wr_result = _kelly_wr_result
 
-        # One-shot Kelly/paper drift check at session start. Runs once in
-        # paper mode to surface stale-bankroll.json state before Fix 4's
-        # per-trade reconcile gets a chance to heal it.
-        if not self._bankroll_drift_checked:
-            self._bankroll_drift_checked = True
-            from execution.paper_trading import PaperOrderManager
-
-            if isinstance(order_mgr, PaperOrderManager):
-                _startup_drift = self._bankroll_tracker.bankroll - order_mgr.balance
-                if abs(_startup_drift) > 1.0:
-                    log.warning(
-                        "BANKROLL_STARTUP_DRIFT kelly_br=$%.2f paper_br=$%.2f drift=%+.2f "
-                        "— stale bankroll.json, reconciling to paper balance",
-                        self._bankroll_tracker.bankroll,
-                        order_mgr.balance,
-                        _startup_drift,
-                    )
-                    self._bankroll_tracker.sync_from_api(order_mgr.balance)
-                else:
-                    log.info(
-                        "bankroll startup check: kelly_br=$%.2f paper_br=$%.2f drift=%+.2f OK",
-                        self._bankroll_tracker.bankroll,
-                        order_mgr.balance,
-                        _startup_drift,
-                    )
+        # v3.0: paper/live startup drift check moved to main.py, before the
+        # strategy loop starts, so it runs before any fire decisions.
 
         strategy.bankroll = self._bankroll_tracker.bankroll
         strategy.sizing_cfg = cfg.sizing

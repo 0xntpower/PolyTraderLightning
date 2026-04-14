@@ -155,7 +155,11 @@ class SignalServer:
     """TCP server for the trading bot to receive signal updates.
 
     Runs its accept loop in a background thread. When a valid HMAC-signed
-    signal arrives, calls the registered handler.
+    signal arrives, calls the registered handler. Optionally also answers
+    ``status_query`` messages by invoking a ``status_provider`` callable
+    that returns a JSON-safe dict to embed in the signed ack — used by the
+    orchestrator to fetch live fire outcomes for the v3.0 signal identity
+    dedupe feedback loop.
     """
 
     def __init__(
@@ -163,8 +167,10 @@ class SignalServer:
         handler: Callable[[dict[str, Any], str], None],
         host: str = "127.0.0.1",
         port: int = 19731,
+        status_provider: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
         self._handler = handler
+        self._status_provider = status_provider
         self._host = host
         self._port = port
         self._key = get_hmac_key()
@@ -245,8 +251,9 @@ class SignalServer:
             log.warning("IPC: payload is not valid JSON — dropping")
             return
 
-        if inner.get("type") != "signal_update":
-            log.warning("IPC: unexpected message type %r — dropping", inner.get("type"))
+        msg_type = inner.get("type")
+        if msg_type not in ("signal_update", "status_query"):
+            log.warning("IPC: unexpected message type %r — dropping", msg_type)
             return
 
         # --- Timestamp freshness ---
@@ -277,17 +284,32 @@ class SignalServer:
                 return
             self._seen_nonces.append(nonce)
 
-        # --- Authenticated — process signal ---
-        signal_data = inner.get("signal", {})
-        summary_file = inner.get("summary_file", "")
-        log.info("IPC: received authenticated signal_update (summary=%s)", summary_file)
-        try:
-            self._handler(signal_data, summary_file)
-            # Signed ack — bound to the request nonce so it can't be spoofed
-            _send_signed_message(sock, {"type": "ack"}, self._key, nonce)
-        # broad catch: server-side handler, unknown client errors
-        except Exception:
-            log.exception("IPC: handler error processing signal_update")
+        # --- Authenticated — dispatch by type ---
+        if msg_type == "signal_update":
+            signal_data = inner.get("signal", {})
+            summary_file = inner.get("summary_file", "")
+            log.info("IPC: received authenticated signal_update (summary=%s)", summary_file)
+            try:
+                self._handler(signal_data, summary_file)
+                _send_signed_message(sock, {"type": "ack"}, self._key, nonce)
+            # broad catch: server-side handler, unknown client errors
+            except Exception:
+                log.exception("IPC: handler error processing signal_update")
+            return
+
+        # status_query — lightweight feedback channel for the orchestrator's
+        # signal identity dedupe. Returns live fire outcomes from the bot.
+        ack_payload: dict[str, Any] = {"type": "ack"}
+        if self._status_provider is not None:
+            try:
+                status = self._status_provider()
+            # broad catch: provider is user-supplied, must never bring down IPC
+            except Exception:
+                log.exception("IPC: status_provider raised — returning empty ack")
+                status = {}
+            if isinstance(status, dict):
+                ack_payload.update(status)
+        _send_signed_message(sock, ack_payload, self._key, nonce)
 
 
 class SignalClient:
@@ -347,6 +369,51 @@ class SignalClient:
         except (OSError, ConnectionError, ValueError) as exc:
             log.error("IPC: unexpected error sending signal — %s", exc)
             return False
+        finally:
+            if sock:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+
+    def query_status(self) -> dict[str, Any] | None:
+        """Ask the bot for its current status over the signed IPC channel.
+
+        Returns the authenticated ack payload (minus the ``type`` field) on
+        success, or ``None`` if the bot is unreachable or the ack fails
+        verification. Used by the v3.0 orchestrator's signal identity dedupe
+        to fetch recent live fire outcomes.
+        """
+        sock = None
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(_SEND_TIMEOUT)
+            sock.connect((self._host, self._port))
+
+            nonce = secrets.token_hex(16)
+            timestamp = datetime.now(UTC).isoformat()
+            inner = {"type": "status_query", "timestamp": timestamp}
+            payload_str = json.dumps(inner, sort_keys=True, separators=(",", ":"))
+            payload_bytes = payload_str.encode("utf-8")
+            signature = _sign(self._key, nonce, payload_bytes)
+
+            _send_message(
+                sock,
+                {"payload": payload_str, "nonce": nonce, "signature": signature},
+            )
+
+            ack = _recv_signed_message(sock, self._key, nonce)
+            if ack is None or ack.get("type") != "ack":
+                log.warning("IPC: no valid ack for status_query")
+                return None
+            return {k: v for k, v in ack.items() if k != "type"}
+
+        except (TimeoutError, ConnectionRefusedError, ConnectionResetError) as exc:
+            log.warning("IPC: status_query connection failed — %s", exc)
+            return None
+        except (OSError, ConnectionError, ValueError) as exc:
+            log.warning("IPC: status_query unexpected error — %s", exc)
+            return None
         finally:
             if sock:
                 try:

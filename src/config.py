@@ -134,6 +134,12 @@ sizing:
   chop_weight: 1.0               # regime weight for chop (0-1)
   outcome_weight: 0.8            # regime weight for outcome bias (0-1)
   feedback_min_trades: 10        # trades before performance feedback activates
+  # v3.0 P6: hostile regime double-cap. When vol_disc or chop_disc exceed
+  # hostile_regime_threshold (severity*weight above the floor), bet dollars
+  # are multiplied by hostile_regime_multiplier in addition to the regime
+  # cap reducing adjusted_p. Protects against sizing through storms.
+  hostile_regime_threshold: 0.20
+  hostile_regime_multiplier: 0.5
 
 # ---------------------------------------------------------------------------
 # Regime detection - volatility, chop, and outcome bias
@@ -164,6 +170,12 @@ erosion:
   panic_min_duration_s: 3.0      # breach must persist N seconds before panic fires
   cusum_sustain_s: 4.0           # v2.9: CUSUM breach must persist N seconds before exit
   cusum_suppress_top_bid: 0.85   # v2.9: suppress CUSUM exit if our side's top bid >= this
+  # v3.0 delta-reversal gate. Only permit a CUSUM exit when the live delta
+  # has reversed by at least this many percentage points versus the fire-time
+  # delta. v2.9 session post-mortem: 4 of 6 CUSUM exits were premature and
+  # every one of them had |current - fire| <= 0.14 pp; the 2 valid exits both
+  # had reversals >= 0.16 pp. 0 disables the gate.
+  cusum_min_reversal_pp: 0.15
 """
 
 
@@ -279,6 +291,11 @@ class SizingConfig:
     chop_weight: float = 1.0  # regime weight for chop (0-1)
     outcome_weight: float = 0.8  # regime weight for outcome bias (0-1)
     feedback_min_trades: int = 10  # trades before performance feedback
+    # v3.0 P6: double regime cap when vol or chop severity is hostile. The
+    # regime cap alone only tips adjusted_p; hostile conditions additionally
+    # scale the final bet dollars to avoid sizing through a storm.
+    hostile_regime_threshold: float = 0.20  # severity*weight above which hostile
+    hostile_regime_multiplier: float = 0.5  # multiplier applied to bet dollars
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,6 +334,12 @@ class ErosionConfig:
     # suppressed. Trade 19 in v2.8 exited via CUSUM while bid_up was 0.99.
     # 0 disables the suppression (exit regardless of orderbook).
     cusum_suppress_top_bid: float = 0.85
+    # v3.0 delta-reversal gate: require the live delta to have reversed by
+    # at least this many pp vs the fire-time delta before a CUSUM exit is
+    # allowed. v2.9 post-mortem showed every premature CUSUM exit had a
+    # reversal depth of <= 0.14 pp while both valid exits had >= 0.16 pp.
+    # 0 disables the gate.
+    cusum_min_reversal_pp: float = 0.15
 
 
 @dataclass(frozen=True, slots=True)

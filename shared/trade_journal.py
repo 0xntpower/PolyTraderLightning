@@ -104,16 +104,16 @@ class TradeJournal:
 
         return records
 
-    def recent_live_fires(self, limit: int) -> list[TradeRecord]:
-        """Return the most-recent `limit` live fires that actually resolved.
+    def recent_resolved_fires(self, limit: int, source: str) -> list[TradeRecord]:
+        """Return the most-recent ``limit`` resolved fires for a given source.
 
-        Only records where ``source == "live"``, ``fired`` is true, and ``won``
+        Only records where ``source`` matches, ``fired`` is true, and ``won``
         has been decided (not None) are returned. Ordered oldest-first within
-        the returned slice so callers can compute rolling win-rate directly.
+        the returned slice so callers can compute rolling win rate directly.
 
-        Used by the orchestrator status_query feedback path: the orchestrator
-        pulls the last N live resolutions to detect stale top-ranked rules
-        whose live win rate has decayed.
+        Used by the orchestrator status_query feedback path (v3.0 P5): the
+        bot passes its own current mode ("paper" or "live") so the dedupe
+        feedback loop works in both paper validation sessions and live runs.
         """
         if limit <= 0 or not self._path.exists():
             return []
@@ -129,7 +129,7 @@ class TradeJournal:
                         data = json.loads(line)
                     except json.JSONDecodeError:
                         continue
-                    if data.get("source") != "live":
+                    if data.get("source") != source:
                         continue
                     if not data.get("fired"):
                         continue

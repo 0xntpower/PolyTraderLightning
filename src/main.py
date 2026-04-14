@@ -1209,13 +1209,20 @@ async def run(signal_path_override: str | None = None, standalone: bool = False)
             pending_signal_mgr.set_pending(signal_data, summary_file)
 
         # v3.0 signal-identity dedupe feedback: the orchestrator pulls the
-        # most-recent live fire outcomes over the same authenticated channel.
-        # A fresh TradeJournal reader is cheap (it's a Path wrapper) and
-        # keeps this decoupled from the strategy loop's writer.
+        # most-recent resolved fires for this bot's current mode over the
+        # same authenticated channel. A fresh TradeJournal reader is cheap
+        # (it's a Path wrapper) and keeps this decoupled from the strategy
+        # loop's writer. We filter by the bot's own mode ("paper" or "live")
+        # so paper validation sessions get feedback from their own paper
+        # fires, not from prior live fires that may exist in the same file.
         _status_journal = TradeJournal(paths.journal)
+        _status_source = "paper" if cfg.is_paper else "live"
 
         def _status_provider() -> dict[str, Any]:
-            fires = _status_journal.recent_live_fires(limit=20)
+            fires = _status_journal.recent_resolved_fires(
+                limit=20,
+                source=_status_source,
+            )
             return {
                 "recent_fires": [
                     {
@@ -1226,6 +1233,7 @@ async def run(signal_path_override: str | None = None, standalone: bool = False)
                     for r in fires
                     if r.won is not None
                 ],
+                "mode": _status_source,
             }
 
         ipc_server = SignalServer(

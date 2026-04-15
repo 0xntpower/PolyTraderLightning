@@ -135,9 +135,14 @@ class SignalConfig:
 
     @property
     def signal_id(self) -> str:
-        """Deterministic identifier from signal parameters."""
+        """Deterministic identifier from signal parameters.
+
+        Side is lowercased so the ID matches the bot's canonical form
+        (the bot's signal_loader normalizes side to lowercase on receipt).
+        Use ``self.side`` directly for display — ``label`` preserves case.
+        """
         return (
-            f"{self.side}_{self.observe_from_s}_{self.observe_to_s}_"
+            f"{self.side.lower()}_{self.observe_from_s}_{self.observe_to_s}_"
             f"{self.min_delta_pct}_{self.max_variance_pct}"
         )
 

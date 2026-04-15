@@ -140,6 +140,10 @@ sizing:
   # cap reducing adjusted_p. Protects against sizing through storms.
   hostile_regime_threshold: 0.20
   hostile_regime_multiplier: 0.5
+  # v3.1: hostile-regime SKIP gate. Above this severity the fire is aborted
+  # entirely instead of merely halved. Leaves a [hostile_regime_threshold,
+  # hostile_regime_skip_threshold) halving band intact. 0 disables.
+  hostile_regime_skip_threshold: 0.25
 
 # ---------------------------------------------------------------------------
 # Regime detection - volatility, chop, and outcome bias
@@ -176,6 +180,11 @@ erosion:
   # every one of them had |current - fire| <= 0.14 pp; the 2 valid exits both
   # had reversals >= 0.16 pp. 0 disables the gate.
   cusum_min_reversal_pp: 0.15
+  # v3.1: overwhelming-breach override. When the CUSUM accumulator reaches
+  # cusum_override_multiplier * cusum_limit, the reversal-pp and top-bid
+  # suppressions are bypassed because the breach is too large to attribute
+  # to noise. 0 disables the override (always honor suppressions).
+  cusum_override_multiplier: 2.0
 """
 
 
@@ -296,6 +305,14 @@ class SizingConfig:
     # scale the final bet dollars to avoid sizing through a storm.
     hostile_regime_threshold: float = 0.20  # severity*weight above which hostile
     hostile_regime_multiplier: float = 0.5  # multiplier applied to bet dollars
+    # v3.1: hostile-regime SKIP gate. When vol or chop severity exceeds this
+    # value the fire is aborted entirely instead of being halved. v3.0 paper
+    # session had one hostile fire at vol_sev=0.274 that lost the full halved
+    # bet (-$25.18 of -$25.79 net). Tier-1 analysis showed skipping fires above
+    # 0.25 turns +$5.79 into ~+$30.80 without touching any non-hostile win.
+    # Must exceed hostile_regime_threshold to leave a halving band intact.
+    # 0 disables the skip.
+    hostile_regime_skip_threshold: float = 0.25
 
 
 @dataclass(frozen=True, slots=True)
@@ -340,6 +357,13 @@ class ErosionConfig:
     # reversal depth of <= 0.14 pp while both valid exits had >= 0.16 pp.
     # 0 disables the gate.
     cusum_min_reversal_pp: float = 0.15
+    # v3.1: overwhelming-breach override. When _erosion_cusum reaches
+    # cusum_override_multiplier * cusum_limit the reversal-pp and top-bid
+    # suppressions are bypassed because the accumulated excess is too large
+    # to attribute to noise. v3.0 01:47 loss had cusum=1.608 (2.01x limit)
+    # blocked by the reversal gate; an override would have cut ~$16 off the
+    # full $25.18 loss. 0 disables the override (always honor suppressions).
+    cusum_override_multiplier: float = 2.0
 
 
 @dataclass(frozen=True, slots=True)

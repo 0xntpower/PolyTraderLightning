@@ -383,15 +383,39 @@ class MomentumSignalStrategy:
                 )
                 return
 
+            # v3.1 overwhelming-breach override. When the accumulator climbs
+            # to cusum_override_multiplier * cusum_limit the excess is too
+            # large to attribute to noise, so the reversal-pp and top-bid
+            # suppressions below are bypassed. v3.0 01:47 loss had
+            # cusum=1.608 (2.01x of 0.80) blocked by the reversal gate.
+            override_active = (
+                ecfg.cusum_override_multiplier > 0.0
+                and self._erosion_cusum >= ecfg.cusum_override_multiplier * ecfg.cusum_limit
+            )
+            if override_active:
+                log.warning(
+                    "EROSION CUSUM OVERRIDE: rank=%d cusum=%.3f >= %.2fx "
+                    "limit %.3f — bypassing reversal/top-bid suppressions",
+                    self.signal_cfg.rank,
+                    self._erosion_cusum,
+                    ecfg.cusum_override_multiplier,
+                    ecfg.cusum_limit,
+                )
+
             # v3.0 delta-reversal gate: require the live delta to have
             # reversed by at least cusum_min_reversal_pp vs fire_delta before
             # an exit is allowed. In the v2.9 session, 4 of 6 CUSUM exits
             # were premature: every one had |current - fire| <= 0.14 pp,
             # while both valid exits had >= 0.16 pp. This gate preserves the
             # valid saves (e.g. v2.9 fire #14, reversal 0.32 pp) and blocks
-            # the false ones (#4/#7/#8/#15, reversal <= 0.14 pp).
+            # the false ones (#4/#7/#8/#15, reversal <= 0.14 pp). The v3.1
+            # override above bypasses this gate when the breach is enormous.
             reversal_pp = abs(current_pct - fire_delta)
-            if ecfg.cusum_min_reversal_pp > 0.0 and reversal_pp < ecfg.cusum_min_reversal_pp:
+            if (
+                not override_active
+                and ecfg.cusum_min_reversal_pp > 0.0
+                and reversal_pp < ecfg.cusum_min_reversal_pp
+            ):
                 log.info(
                     "EROSION CUSUM SUPPRESSED (reversal too shallow): rank=%d "
                     "reversal=%.4f%% < min=%.4f%% cusum=%.3f erosion=%.4f "
@@ -410,13 +434,15 @@ class MomentumSignalStrategy:
             # position's side already reflects a winning outcome, suppress
             # the CUSUM exit regardless of BTC delta erosion. v2.8 Trade 19
             # exited via CUSUM while bid_up=0.99; the orderbook was telling
-            # us we were right and the BTC wobble was noise.
+            # us we were right and the BTC wobble was noise. The v3.1
+            # override above bypasses this gate when the breach is enormous.
             sc = self.signal_cfg
             our_top_bid = (
                 self.state.best_bid_up if sc.side == Direction.UP else self.state.best_bid_down
             )
             if (
-                ecfg.cusum_suppress_top_bid > 0.0
+                not override_active
+                and ecfg.cusum_suppress_top_bid > 0.0
                 and our_top_bid > 0.0
                 and our_top_bid >= ecfg.cusum_suppress_top_bid
             ):
@@ -910,16 +936,30 @@ class MomentumSignalStrategy:
                 )
                 return
 
-            # v3.0 P6: double regime cap in hostile conditions. The regime cap
-            # already reduces adjusted_p (and therefore raw Kelly), but when
-            # vol or chop severity is severe we also halve the dollar size to
-            # avoid sizing into a storm. Evaluated once here, applied to
-            # kr.bet_size before SPRT so the multiplier composes cleanly.
+            # v3.0 P6 / v3.1 hostile-regime stack. The regime cap already
+            # reduces adjusted_p (and therefore raw Kelly); on top of that:
+            #   - severity > skip_threshold (v3.1): abort the fire entirely
+            #   - severity > hostile_regime_threshold (v3.0): halve bet dollars
+            # Evaluated once here so the metric and the band boundaries stay
+            # consistent across the skip and the multiplier paths.
             _hostile_metric = max(
                 self.kelly_wr_result.vol_discount,
                 self.kelly_wr_result.chop_discount,
             )
             _hostile_threshold = self.sizing_cfg.hostile_regime_threshold
+            _hostile_skip_threshold = self.sizing_cfg.hostile_regime_skip_threshold
+            if _hostile_skip_threshold > 0.0 and _hostile_metric > _hostile_skip_threshold:
+                log.info(
+                    "[SKIP] rank=%d side=%s reason=HOSTILE_REGIME_SKIP "
+                    "vol=%.3f chop=%.3f max=%.3f > skip_thresh=%.3f",
+                    sc.rank,
+                    sc.side.value,
+                    self.kelly_wr_result.vol_discount,
+                    self.kelly_wr_result.chop_discount,
+                    _hostile_metric,
+                    _hostile_skip_threshold,
+                )
+                return
             if _hostile_metric > _hostile_threshold:
                 _hostile_mult = self.sizing_cfg.hostile_regime_multiplier
                 _pre = kr.bet_size

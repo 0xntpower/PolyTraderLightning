@@ -836,9 +836,14 @@ class TestCusumReversalGate:
         min_reversal_pp: float = 0.15,
     ) -> tuple[MomentumSignalStrategy, _FakeErosionOrderMgr]:
         """Build a strategy where sustain has elapsed so the reversal gate
-        is the next check on any tick that keeps the CUSUM breached."""
+        is the next check on any tick that keeps the CUSUM breached. The
+        v3.1 cusum override is disabled here so the gate is exercised in
+        isolation; TestCusumOverride covers the bypass behavior."""
         strategy, order_mgr = _prime_erosion_state(best_bid_up=best_bid_up)
-        strategy.erosion_cfg = ErosionConfig(cusum_min_reversal_pp=min_reversal_pp)
+        strategy.erosion_cfg = ErosionConfig(
+            cusum_min_reversal_pp=min_reversal_pp,
+            cusum_override_multiplier=0.0,
+        )
         # Pre-expire the sustain timer so the reversal check runs first.
         strategy._cusum_breach_started_at = 0.0
         # Push the CUSUM well above the limit so even a decayed tick stays
@@ -923,6 +928,7 @@ class TestHostileRegimeCap:
         chop_discount: float = 0.0,
         hostile_threshold: float = 0.20,
         hostile_multiplier: float = 0.5,
+        hostile_skip_threshold: float = 0.0,
     ) -> tuple[MomentumSignalStrategy, FakeOrderExecutor]:
         strategy, executor = _make_strategy(
             side=Direction.UP,
@@ -943,6 +949,7 @@ class TestHostileRegimeCap:
         strategy.sizing_cfg = SizingConfig(
             hostile_regime_threshold=hostile_threshold,
             hostile_regime_multiplier=hostile_multiplier,
+            hostile_regime_skip_threshold=hostile_skip_threshold,
         )
         strategy.erosion_cfg = ErosionConfig()
         strategy.bankroll = 1000.0
@@ -1035,6 +1042,189 @@ class TestHostileRegimeCap:
         hostile_size = hostile_exec.calls[0].size_usd
 
         assert hostile_size == pytest.approx(benign_size * 0.25, rel=0.03)
+
+
+# ---------------------------------------------------------------------------
+# v3.1 — hostile-regime SKIP gate
+# ---------------------------------------------------------------------------
+
+
+class TestHostileRegimeSkip:
+    """The v3.1 hostile-regime skip aborts the fire entirely when severity
+    exceeds hostile_regime_skip_threshold, leaving the
+    [hostile_regime_threshold, hostile_regime_skip_threshold) band to the
+    existing v3.0 P6 halving. Skip threshold default 0.25 — driven by the
+    v3.0 paper session loss at vol_sev=0.274."""
+
+    @pytest.mark.asyncio
+    async def test_vol_above_skip_threshold_aborts_fire(self):
+        strategy, executor = TestHostileRegimeCap._build(
+            vol_discount=0.30,
+            hostile_skip_threshold=0.25,
+        )
+        await _run_fire(strategy, executor)
+        # No order placed at all — the skip exits the sizing block early.
+        assert len(executor.calls) == 0
+
+    @pytest.mark.asyncio
+    async def test_chop_above_skip_threshold_aborts_fire(self):
+        strategy, executor = TestHostileRegimeCap._build(
+            chop_discount=0.40,
+            hostile_skip_threshold=0.25,
+        )
+        await _run_fire(strategy, executor)
+        assert len(executor.calls) == 0
+
+    @pytest.mark.asyncio
+    async def test_severity_inside_halving_band_still_fires_halved(self):
+        """Severity in (hostile_threshold, skip_threshold] takes the halving
+        path and still places an order — the skip must not steal that band."""
+        benign, benign_exec = TestHostileRegimeCap._build(
+            vol_discount=0.05,
+            hostile_skip_threshold=0.25,
+        )
+        await _run_fire(benign, benign_exec)
+        benign_size = benign_exec.calls[0].size_usd
+
+        halved, halved_exec = TestHostileRegimeCap._build(
+            vol_discount=0.23,  # > 0.20 (halve), <= 0.25 (skip threshold)
+            hostile_skip_threshold=0.25,
+        )
+        await _run_fire(halved, halved_exec)
+        assert len(halved_exec.calls) == 1
+        assert halved_exec.calls[0].size_usd == pytest.approx(benign_size * 0.5, rel=0.02)
+
+    @pytest.mark.asyncio
+    async def test_severity_exactly_equal_does_not_skip(self):
+        """The skip uses strict greater-than so equality stays in the halving
+        band."""
+        strategy, executor = TestHostileRegimeCap._build(
+            vol_discount=0.25,
+            hostile_skip_threshold=0.25,
+        )
+        await _run_fire(strategy, executor)
+        # Did not skip — still produced an order (halved by the v3.0 P6 path).
+        assert len(executor.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_skip_disabled_with_zero(self):
+        """hostile_regime_skip_threshold=0 disables the skip — even a wildly
+        hostile severity still fires (subject to the halving path)."""
+        strategy, executor = TestHostileRegimeCap._build(
+            vol_discount=0.50,
+            hostile_skip_threshold=0.0,
+        )
+        await _run_fire(strategy, executor)
+        assert len(executor.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# v3.1 — CUSUM overwhelming-breach override
+# ---------------------------------------------------------------------------
+
+
+class TestCusumOverride:
+    """The v3.1 override bypasses the reversal-pp gate and the top-bid
+    suppression once the CUSUM accumulator climbs to
+    cusum_override_multiplier * cusum_limit. Covers the v3.0 01:47 loss
+    case (cusum=1.608 = 2.01x of 0.80, blocked by the reversal gate)."""
+
+    @staticmethod
+    def _primed(
+        *,
+        best_bid_up: float = 0.20,
+        cusum_value: float = 1.80,
+        override_multiplier: float = 2.0,
+        min_reversal_pp: float = 0.15,
+        suppress_top_bid: float = 0.85,
+    ) -> tuple[MomentumSignalStrategy, _FakeErosionOrderMgr]:
+        strategy, order_mgr = _prime_erosion_state(best_bid_up=best_bid_up)
+        strategy.erosion_cfg = ErosionConfig(
+            cusum_min_reversal_pp=min_reversal_pp,
+            cusum_suppress_top_bid=suppress_top_bid,
+            cusum_override_multiplier=override_multiplier,
+        )
+        # Sustain already cleared so we walk straight to the suppressions.
+        strategy._cusum_breach_started_at = 0.0
+        strategy._erosion_cusum = cusum_value
+        return strategy, order_mgr
+
+    @pytest.mark.asyncio
+    async def test_override_bypasses_shallow_reversal(self, monkeypatch):
+        """cusum >= 2x limit and shallow reversal — exit fires anyway."""
+        # 2x of default cusum_limit (0.80) = 1.60. 1.80 clears it.
+        strategy, order_mgr = self._primed(cusum_value=1.80)
+        clock = _Clock(start=1000.0)
+        _patch_erosion_env(monkeypatch, clock)
+
+        # Shallow reversal: fire=1.0, current=0.95, |diff|=0.05 < 0.15
+        sig = _make_signal(bn_direction_from_open_pct=0.0095)
+        await strategy._monitor_post_fire_erosion(sig, order_mgr)
+
+        assert strategy._early_exit_triggered
+        assert len(order_mgr.exit_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_override_bypasses_top_bid_suppression(self, monkeypatch):
+        """cusum >= 2x limit and friendly top bid — exit fires anyway."""
+        strategy, order_mgr = self._primed(
+            best_bid_up=0.95,
+            cusum_value=1.80,
+        )
+        clock = _Clock(start=1000.0)
+        _patch_erosion_env(monkeypatch, clock)
+
+        # Deep reversal so we are not blocked by the reversal gate either.
+        sig = _make_signal(bn_direction_from_open_pct=0.0)
+        await strategy._monitor_post_fire_erosion(sig, order_mgr)
+
+        assert strategy._early_exit_triggered
+        assert len(order_mgr.exit_calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_below_override_threshold_still_suppressed(self, monkeypatch):
+        """Just below 2x limit — reversal gate still blocks the exit."""
+        # 2x of 0.80 = 1.60. 1.40 is above limit, below override threshold.
+        strategy, order_mgr = self._primed(cusum_value=1.40)
+        clock = _Clock(start=1000.0)
+        _patch_erosion_env(monkeypatch, clock)
+
+        sig = _make_signal(bn_direction_from_open_pct=0.0095)
+        await strategy._monitor_post_fire_erosion(sig, order_mgr)
+
+        assert not strategy._early_exit_triggered
+        assert order_mgr.exit_calls == []
+
+    @pytest.mark.asyncio
+    async def test_override_disabled_with_zero(self, monkeypatch):
+        """cusum_override_multiplier=0 disables the override — even a huge
+        breach is still blocked by the reversal gate."""
+        strategy, order_mgr = self._primed(
+            cusum_value=10.0,
+            override_multiplier=0.0,
+        )
+        clock = _Clock(start=1000.0)
+        _patch_erosion_env(monkeypatch, clock)
+
+        sig = _make_signal(bn_direction_from_open_pct=0.0095)
+        await strategy._monitor_post_fire_erosion(sig, order_mgr)
+
+        assert not strategy._early_exit_triggered
+        assert order_mgr.exit_calls == []
+
+    @pytest.mark.asyncio
+    async def test_v3_0_loss_replay(self, monkeypatch):
+        """Replay the v3.0 01:47 loss numbers: cusum=1.608 (2.01x of 0.80)
+        with shallow reversal — override fires the exit."""
+        strategy, order_mgr = self._primed(cusum_value=1.608)
+        clock = _Clock(start=1000.0)
+        _patch_erosion_env(monkeypatch, clock)
+
+        sig = _make_signal(bn_direction_from_open_pct=0.0095)
+        await strategy._monitor_post_fire_erosion(sig, order_mgr)
+
+        assert strategy._early_exit_triggered
+        assert len(order_mgr.exit_calls) == 1
 
 
 # ---------------------------------------------------------------------------

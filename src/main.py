@@ -721,6 +721,10 @@ async def _strategy_loop(
         initial_bankroll=cfg.sizing.bankroll,
         path=paths.bankroll,
     )
+    # Attach bankroll-corruption kill switch to the risk registry. RiskRegistry
+    # is built in run() before this function is called, so the check is
+    # wired post-hoc here, as soon as BankrollTracker exists.
+    risk.register_bankroll_check(bankroll_tracker)
     recent_outcomes: deque[int] = deque(maxlen=KELLY_OUTCOME_WINDOW_SIZE)
     # Parallel deque of in-flight optimistic live outcomes (from end-of-window
     # snapshots, before Gamma API confirms). Shared between ResolutionManager

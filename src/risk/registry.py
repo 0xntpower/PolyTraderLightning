@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from config import RiskConfig
     from risk.position_tracker import PositionTracker
+    from strategy.kelly import BankrollTracker
 
 log = logging.getLogger(__name__)
 
@@ -101,6 +102,27 @@ class WindowExposureCap:
         return RiskVerdict(allowed=True)
 
 
+class BankrollCorruptedLimit:
+    """Halt trading when the bankroll tracker flags irrecoverable state.
+
+    Trips on BankrollTracker.is_corrupted — see kelly.BankrollTracker for
+    the conditions that set it (negative update_loss, rejected sync_from_api).
+    """
+
+    name = "bankroll_corrupted"
+
+    def __init__(self, tracker: BankrollTracker) -> None:
+        self._tracker = tracker
+
+    def check(self, additional_usd: float = 0.0) -> RiskVerdict:  # noqa: ARG002  # required by RiskCheck Protocol
+        if self._tracker.is_corrupted:
+            return RiskVerdict(
+                allowed=False,
+                reason=f"bankroll corrupted: {self._tracker.corruption_reason}",
+            )
+        return RiskVerdict(allowed=True)
+
+
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
@@ -154,6 +176,14 @@ class RiskRegistry:
     @property
     def halt_reason(self) -> str:
         return self._halt_reason
+
+    def register_bankroll_check(self, bankroll_tracker: BankrollTracker) -> None:
+        """Wire a BankrollCorruptedLimit after construction.
+
+        RiskRegistry is built in ``run()`` before the strategy loop creates
+        ``BankrollTracker``, so the bankroll check is attached post-hoc.
+        """
+        self.register(BankrollCorruptedLimit(bankroll_tracker))
 
     @classmethod
     def from_config(cls, cfg: RiskConfig, tracker: PositionTracker) -> RiskRegistry:

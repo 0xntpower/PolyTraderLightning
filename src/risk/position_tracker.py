@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -14,13 +14,6 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 log = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True, slots=True)
-class WindowPnL:
-    window_ts: int
-    pnl: float
-    won: bool
 
 
 @dataclass
@@ -33,7 +26,6 @@ class PositionTracker:
     windows_won: int = 0
     consecutive_losses: int = 0
     window_exposure_usd: float = 0.0
-    history: list[WindowPnL] = field(default_factory=list)
 
     def record_window(
         self,
@@ -43,25 +35,51 @@ class PositionTracker:
         mode: str = "paper",
         balance: float | None = None,
     ) -> None:
-        won = pnl > 0
-        self.history.append(WindowPnL(window_ts=window_ts, pnl=pnl, won=won))
+        # Untraded windows must not touch P&L or streak counters. All current
+        # call sites pass pnl=0.0 when traded=False; a non-zero value here
+        # points at an upstream accounting bug (partial fill, early-exit
+        # divergence) and is an error we want to surface rather than silently
+        # absorb into daily totals.
+        if not traded:
+            if pnl != 0.0:
+                log.error(
+                    "record_window called with traded=False but pnl=%.4f "
+                    "(window_ts=%d) — ignoring; investigate upstream",
+                    pnl,
+                    window_ts,
+                )
+            # Still log a summary line so the window is represented in logs.
+            win_pct = (
+                (self.windows_won / self.windows_traded * 100) if self.windows_traded > 0 else 0.0
+            )
+            log.info(
+                "WINDOW_SUMMARY window_pnl=$0.0000 session_pnl=$%.4f "
+                "won=$%.4f lost=$%.4f wr=%.1f%% (%d/%d) consec_losses=%d (not traded)",
+                self.total_pnl,
+                self.total_winnings,
+                self.total_losses,
+                win_pct,
+                self.windows_won,
+                self.windows_traded,
+                self.consecutive_losses,
+            )
+            return
+
         self.daily_pnl += pnl
         self.total_pnl += pnl
 
-        if traded:
-            self.windows_traded += 1
-            if won:
-                self.windows_won += 1
-                self.total_winnings += pnl
-                self.consecutive_losses = 0
-            elif pnl < 0:
-                self.total_losses += abs(pnl)
-                self.consecutive_losses += 1
-        # If not traded, PnL should be 0, but update consecutive losses if negative
+        self.windows_traded += 1
+        if pnl > 0:
+            self.windows_won += 1
+            self.total_winnings += pnl
+            self.consecutive_losses = 0
         elif pnl < 0:
+            self.total_losses += abs(pnl)
             self.consecutive_losses += 1
+        # pnl == 0 on a traded window (flat fill after fees) leaves
+        # consecutive_losses unchanged — neither win nor loss.
 
-        win_pct = (self.windows_won / self.windows_traded * 100) if self.windows_traded > 0 else 0
+        win_pct = (self.windows_won / self.windows_traded * 100) if self.windows_traded > 0 else 0.0
 
         log.info(
             "WINDOW_SUMMARY window_pnl=$%.4f session_pnl=$%.4f "
@@ -76,8 +94,9 @@ class PositionTracker:
             self.consecutive_losses,
         )
 
-        # Only send Discord summary when a trade actually resolved
-        if traded and pnl != 0:
+        # Only send Discord summary when a trade actually resolved with P&L.
+        # (Untraded windows already returned above.)
+        if pnl != 0:
             send_window_summary(
                 mode=mode,
                 window_pnl=pnl,

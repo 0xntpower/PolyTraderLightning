@@ -338,3 +338,81 @@ class TestBankrollTracker:
         bt = BankrollTracker(initial_bankroll=1000.0, path=path)
         drift = bt.sync_from_api(1000.0)
         assert abs(drift) <= 0.01
+
+    # ------------------------------------------------------------------
+    # Corruption handling (Item 4)
+    # ------------------------------------------------------------------
+
+    def test_fresh_tracker_not_corrupted(self, tmp_path):
+        bt = BankrollTracker(initial_bankroll=1000.0, path=tmp_path / "b.json")
+        assert not bt.is_corrupted
+        assert bt.corruption_reason == ""
+
+    def test_loss_exceeding_bankroll_clamps_at_zero_and_marks_corrupted(self, tmp_path, caplog):
+        bt = BankrollTracker(initial_bankroll=5.0, path=tmp_path / "b.json")
+        with caplog.at_level("CRITICAL", logger="strategy.kelly"):
+            result = bt.update_loss(size=100.0, entry_price=0.85, fee=0.50)
+        assert result == 0.0
+        assert bt.bankroll == 0.0
+        assert bt.is_corrupted
+        assert "update_loss" in bt.corruption_reason
+        assert any("BANKROLL CORRUPTED" in rec.message for rec in caplog.records)
+
+    def test_corruption_log_is_idempotent(self, tmp_path, caplog):
+        """Second corrupting event must not emit another CRITICAL line."""
+        bt = BankrollTracker(initial_bankroll=5.0, path=tmp_path / "b.json")
+        with caplog.at_level("CRITICAL", logger="strategy.kelly"):
+            bt.update_loss(size=100.0, entry_price=0.85, fee=0.0)
+            first_count = sum(1 for r in caplog.records if "BANKROLL CORRUPTED" in r.message)
+            bt.update_loss(size=50.0, entry_price=0.85, fee=0.0)
+            second_count = sum(1 for r in caplog.records if "BANKROLL CORRUPTED" in r.message)
+        assert first_count == 1
+        assert second_count == 1
+
+    def test_normal_loss_does_not_mark_corrupted(self, tmp_path):
+        bt = BankrollTracker(initial_bankroll=1000.0, path=tmp_path / "b.json")
+        bt.update_loss(size=10.0, entry_price=0.85, fee=0.01)
+        assert not bt.is_corrupted
+        assert bt.bankroll > 980.0
+
+    def test_sync_rejects_negative_balance(self, tmp_path, caplog):
+        bt = BankrollTracker(initial_bankroll=1000.0, path=tmp_path / "b.json")
+        with caplog.at_level("CRITICAL", logger="strategy.kelly"):
+            drift = bt.sync_from_api(-50.0)
+        assert drift == 0.0
+        assert bt.bankroll == 1000.0  # unchanged
+        assert bt.is_corrupted
+        assert "negative" in bt.corruption_reason.lower()
+
+    def test_sync_rejects_10x_jump(self, tmp_path, caplog):
+        """10x+ jump suggests API glitch — reject, flag corrupted."""
+        bt = BankrollTracker(initial_bankroll=1000.0, path=tmp_path / "b.json")
+        with caplog.at_level("CRITICAL", logger="strategy.kelly"):
+            drift = bt.sync_from_api(20000.0)
+        assert drift == 0.0
+        assert bt.bankroll == 1000.0
+        assert bt.is_corrupted
+
+    def test_sync_accepts_small_deposit_within_ratio(self, tmp_path):
+        """Reasonable deposit (e.g. 50% top-up) must still apply."""
+        bt = BankrollTracker(initial_bankroll=1000.0, path=tmp_path / "b.json")
+        bt.sync_from_api(1500.0)
+        assert bt.bankroll == 1500.0
+        assert not bt.is_corrupted
+
+    def test_sync_does_not_apply_ratio_guard_when_bankroll_tiny(self, tmp_path):
+        """When bankroll is $1 or less, initial top-up to any value is fine."""
+        bt = BankrollTracker(initial_bankroll=0.50, path=tmp_path / "b.json")
+        bt.sync_from_api(1000.0)
+        assert bt.bankroll == 1000.0
+        assert not bt.is_corrupted
+
+    def test_reset_clears_corruption(self, tmp_path):
+        bt = BankrollTracker(initial_bankroll=5.0, path=tmp_path / "b.json")
+        bt.update_loss(size=100.0, entry_price=0.85, fee=0.0)
+        assert bt.is_corrupted
+
+        bt.reset(new_bankroll=1000.0)
+        assert not bt.is_corrupted
+        assert bt.corruption_reason == ""
+        assert bt.bankroll == 1000.0

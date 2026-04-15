@@ -320,22 +320,62 @@ def estimate_adjusted_win_rate(
 # ---------------------------------------------------------------------------
 
 
+# Reject sync_from_api values more than this multiple above the current
+# bankroll. A 10x jump typically indicates an API glitch (wrong account,
+# units mismatch) rather than legitimate deposit — safer to flag and halt
+# than silently trade on corrupted state.
+_BANKROLL_SYNC_MAX_RATIO = 10.0
+
+
+class BankrollCorruptedError(RuntimeError):
+    """Raised when the bankroll tracker detects irrecoverable state."""
+
+
 class BankrollTracker:
     """Tracks bankroll across trades. Persists to disk atomically.
 
     Bankroll updates are called only from the main asyncio event loop —
     no locks needed.
+
+    Corruption handling
+    -------------------
+    If ``update_loss`` would take bankroll negative, or ``sync_from_api``
+    receives a clearly invalid value, the tracker clamps at zero and sets
+    ``is_corrupted = True``. A single CRITICAL log line is emitted on the
+    transition. The ``BankrollCorruptedLimit`` risk check consumes the
+    flag and halts trading via the risk registry kill switch.
     """
 
     def __init__(self, initial_bankroll: float, path: Path) -> None:
         self._bankroll = initial_bankroll
         self._path = path
+        self._is_corrupted = False
+        self._corruption_reason = ""
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._load()
 
     @property
     def bankroll(self) -> float:
         return self._bankroll
+
+    @property
+    def is_corrupted(self) -> bool:
+        return self._is_corrupted
+
+    @property
+    def corruption_reason(self) -> str:
+        return self._corruption_reason
+
+    def _mark_corrupted(self, reason: str) -> None:
+        """Transition to corrupted state — logs once, idempotent."""
+        if not self._is_corrupted:
+            log.critical(
+                "BANKROLL CORRUPTED: %s (bankroll=$%.4f) — halting trading",
+                reason,
+                self._bankroll,
+            )
+            self._is_corrupted = True
+            self._corruption_reason = reason
 
     def update_win(self, size: float, entry_price: float, fee: float = 0.0) -> float:
         """Update bankroll after a winning trade. Returns new bankroll."""
@@ -346,19 +386,50 @@ class BankrollTracker:
         return self._bankroll
 
     def update_loss(self, size: float, entry_price: float, fee: float = 0.0) -> float:
-        """Update bankroll after a losing trade. Returns new bankroll."""
+        """Update bankroll after a losing trade. Returns new bankroll.
+
+        If the loss would take bankroll negative, the result is clamped at
+        zero and the tracker is marked corrupted. A negative bankroll means
+        the real loss exceeded what we actually had — an upstream accounting
+        bug (double-counted fees, drifted entry price, missed update_win)
+        that must be investigated before further trading.
+        """
         shares = size / entry_price
         loss = shares * entry_price + fee
-        self._bankroll -= loss
+        new_bankroll = self._bankroll - loss
+        if new_bankroll < 0.0:
+            self._mark_corrupted(
+                f"update_loss would take bankroll to ${new_bankroll:.4f} "
+                f"(size=${size:.2f} entry={entry_price:.4f} fee=${fee:.4f})"
+            )
+            self._bankroll = 0.0
+        else:
+            self._bankroll = new_bankroll
         self._save()
         return self._bankroll
 
     def sync_from_api(self, api_balance: float) -> float:
         """Sync bankroll with on-chain balance. Returns drift amount.
 
-        If there is meaningful drift (>$0.01), updates bankroll to match
-        the API value and persists to disk.
+        Rejects obviously invalid API values rather than applying them:
+          - negative balance (impossible on-chain)
+          - balance > current * _BANKROLL_SYNC_MAX_RATIO when current > $1
+            (suggests API glitch, wrong account, or units error)
+
+        If there is meaningful drift (>$0.01) and the value is valid,
+        updates bankroll to match the API value and persists to disk.
         """
+        if api_balance < 0.0:
+            self._mark_corrupted(f"sync_from_api received negative balance ${api_balance:.4f}")
+            return 0.0
+        if self._bankroll > 1.0 and api_balance > self._bankroll * _BANKROLL_SYNC_MAX_RATIO:
+            self._mark_corrupted(
+                f"sync_from_api value ${api_balance:.2f} is > "
+                f"{_BANKROLL_SYNC_MAX_RATIO:.0f}x current ${self._bankroll:.2f} "
+                f"— suspected API glitch, not applied"
+            )
+            return 0.0
+
         drift = api_balance - self._bankroll
         if abs(drift) > 0.01:
             log.info(
@@ -372,8 +443,10 @@ class BankrollTracker:
         return drift
 
     def reset(self, new_bankroll: float) -> None:
-        """Reset bankroll to a new value."""
+        """Reset bankroll to a new value. Clears corruption flag."""
         self._bankroll = new_bankroll
+        self._is_corrupted = False
+        self._corruption_reason = ""
         self._save()
 
     def _load(self) -> None:

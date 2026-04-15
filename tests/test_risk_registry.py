@@ -10,6 +10,7 @@ Covers:
 from __future__ import annotations
 
 from risk.registry import (
+    BankrollCorruptedLimit,
     ConsecutiveLossLimit,
     DailyLossLimit,
     RiskRegistry,
@@ -80,6 +81,26 @@ class TestConsecutiveLossLimit:
         tracker = FakeTracker(consecutive_losses=0)
         check = ConsecutiveLossLimit(5, tracker)
         assert check.check().allowed
+
+
+class FakeBankrollTracker:
+    def __init__(self, is_corrupted: bool = False, reason: str = "") -> None:
+        self.is_corrupted = is_corrupted
+        self.corruption_reason = reason
+
+
+class TestBankrollCorruptedLimit:
+    def test_allows_when_not_corrupted(self):
+        check = BankrollCorruptedLimit(FakeBankrollTracker(is_corrupted=False))
+        assert check.check().allowed
+
+    def test_blocks_when_corrupted(self):
+        tracker = FakeBankrollTracker(is_corrupted=True, reason="negative loss")
+        check = BankrollCorruptedLimit(tracker)
+        v = check.check()
+        assert not v.allowed
+        assert "bankroll corrupted" in v.reason
+        assert "negative loss" in v.reason
 
 
 class TestWindowExposureCap:
@@ -186,3 +207,25 @@ class TestRiskRegistry:
 
         assert not reg.can_trade()
         assert reg.halted
+
+    def test_register_bankroll_check_halts_when_corrupted(self):
+        """register_bankroll_check wires the post-hoc kill switch."""
+        position_tracker = FakeTracker(daily_pnl=0.0, consecutive_losses=0, window_exposure_usd=0.0)
+        cfg = FakeRiskConfig()
+        reg = RiskRegistry.from_config(cfg, position_tracker)
+        reg.register_bankroll_check(
+            FakeBankrollTracker(is_corrupted=True, reason="update_loss underflow")
+        )
+
+        assert not reg.can_trade()
+        assert reg.halted
+        assert "bankroll corrupted" in reg.halt_reason
+
+    def test_register_bankroll_check_allows_when_healthy(self):
+        position_tracker = FakeTracker(daily_pnl=0.0, consecutive_losses=0, window_exposure_usd=0.0)
+        cfg = FakeRiskConfig()
+        reg = RiskRegistry.from_config(cfg, position_tracker)
+        reg.register_bankroll_check(FakeBankrollTracker(is_corrupted=False))
+
+        assert reg.can_trade(additional_usd=5.0)
+        assert not reg.halted

@@ -1406,6 +1406,10 @@ async def run(signal_path_override: str | None = None, standalone: bool = False)
                 task.cancel()
             with suppress(asyncio.CancelledError):
                 await asyncio.gather(*all_tasks)
+            # Shut down the dedicated CLOB thread pool (live mode only).
+            # Paper mode's order manager has no blocking HTTP workers.
+            if isinstance(order_mgr, OrderManager):
+                order_mgr.close()
             log.info(
                 "bot stopped — daily pnl=%.4f total=%.4f",
                 position_tracker.daily_pnl,

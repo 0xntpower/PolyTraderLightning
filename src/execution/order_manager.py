@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
@@ -39,6 +40,11 @@ log = logging.getLogger(__name__)
 # Prevents hung HTTP requests from blocking the event loop indefinitely.
 _CLOB_CALL_TIMEOUT_SEC = 10.0
 
+# Dedicated thread-pool size for blocking py-clob-client HTTP calls. Sized so a
+# burst (cancel sweep + balance refresh + order placement) cannot starve the
+# default executor that aiohttp / other run_in_executor consumers share.
+_CLOB_EXECUTOR_WORKERS = 8
+
 
 class OrderManager:
     mode: str = "live"
@@ -56,6 +62,13 @@ class OrderManager:
         self.clob = clob
         self.risk = risk
         self.fee_tracker = fee_tracker
+        # Dedicated thread pool for blocking py-clob-client HTTP calls so
+        # they never contend with the default run_in_executor pool used by
+        # aiohttp and other stdlib consumers.
+        self._clob_exec = ThreadPoolExecutor(
+            max_workers=_CLOB_EXECUTOR_WORKERS,
+            thread_name_prefix="clob",
+        )
         self._cancel_in_progress: bool = False
         self._cached_balance_usd: float | None = None
         # Track placed order details for cancel notifications
@@ -117,6 +130,18 @@ class OrderManager:
         self._kelly_telemetry = {}
         return snap
 
+    def close(self) -> None:
+        """Shut down the dedicated CLOB thread pool.
+
+        Called from ``main.run()``'s finally block during bot teardown so
+        lingering HTTP workers don't keep the process alive after task
+        cancellation. ``wait=False`` is intentional: any in-flight CLOB call
+        is already protected by ``asyncio.wait_for`` with
+        ``_CLOB_CALL_TIMEOUT_SEC``, so blocking shutdown on them serves no
+        purpose at Ctrl+C time.
+        """
+        self._clob_exec.shutdown(wait=False, cancel_futures=True)
+
     async def exit_position_early(self, sell_price: float) -> float | None:
         """Place a live SELL taker order to exit the current filled position.
 
@@ -158,7 +183,7 @@ class OrderManager:
             # — the taker equivalent of a buy-side FOK for sells.
             signed_order = await asyncio.wait_for(
                 loop.run_in_executor(
-                    None,
+                    self._clob_exec,
                     partial(
                         self.clob.create_order,
                         OrderArgs(
@@ -173,7 +198,7 @@ class OrderManager:
             )
             resp = await asyncio.wait_for(
                 loop.run_in_executor(
-                    None,
+                    self._clob_exec,
                     partial(self.clob.post_order, signed_order, OrderType.FAK),
                 ),
                 timeout=_CLOB_CALL_TIMEOUT_SEC,
@@ -233,7 +258,7 @@ class OrderManager:
         try:
             resp = await asyncio.wait_for(
                 loop.run_in_executor(
-                    None,
+                    self._clob_exec,
                     lambda: self.clob.get_balance_allowance(
                         BalanceAllowanceParams(
                             signature_type=self.cfg.connections.signature_type,
@@ -271,7 +296,7 @@ class OrderManager:
         try:
             await asyncio.wait_for(
                 loop.run_in_executor(
-                    None,
+                    self._clob_exec,
                     partial(self.clob.cancel, order_id),
                 ),
                 timeout=_CLOB_CALL_TIMEOUT_SEC,
@@ -351,7 +376,7 @@ class OrderManager:
         try:
             resp = await asyncio.wait_for(
                 loop.run_in_executor(
-                    None,
+                    self._clob_exec,
                     partial(
                         self.clob.create_and_post_order,
                         OrderArgs(
@@ -438,14 +463,14 @@ class OrderManager:
             )
             signed_order = await asyncio.wait_for(
                 loop.run_in_executor(
-                    None,
+                    self._clob_exec,
                     partial(self.clob.create_market_order, market_args),
                 ),
                 timeout=_CLOB_CALL_TIMEOUT_SEC,
             )
             resp = await asyncio.wait_for(
                 loop.run_in_executor(
-                    None,
+                    self._clob_exec,
                     partial(self.clob.post_order, signed_order, OrderType.FOK),
                 ),
                 timeout=_CLOB_CALL_TIMEOUT_SEC,
@@ -496,7 +521,7 @@ class OrderManager:
                 try:
                     await asyncio.wait_for(
                         loop.run_in_executor(
-                            None,
+                            self._clob_exec,
                             partial(self.clob.cancel, order_id),
                         ),
                         timeout=_CLOB_CALL_TIMEOUT_SEC,

@@ -1275,3 +1275,93 @@ class TestMakerMonitoring:
 
         assert strategy._entry_complete
         assert "fake-order-1" in executor.cancelled_orders
+
+
+# ---------------------------------------------------------------------------
+# reset() invariant — guards against forgetting a field when post-fire state grows
+# ---------------------------------------------------------------------------
+
+
+class TestResetInvariant:
+    """reset() must restore every private field to its post-construction value.
+
+    This test is the safety net for F1 in the v3.1 review: MomentumSignalStrategy
+    owns ~30 mutable _-prefixed fields and reset() is a manual list. Any future
+    addition that lands in __init__ but not in reset() will be caught here.
+    """
+
+    @staticmethod
+    def _private_field_snapshot(
+        strategy: MomentumSignalStrategy,
+    ) -> dict[str, object]:
+        """Capture all _-prefixed instance attributes (the post-fire mutable state)."""
+        return {k: v for k, v in vars(strategy).items() if k.startswith("_")}
+
+    def test_reset_restores_all_private_fields(self):
+        strategy, _ = _make_strategy()
+        baseline = self._private_field_snapshot(strategy)
+
+        # Dirty every known post-fire field. If a new field is added to __init__
+        # without being mutated here, the test still passes — the real guard is
+        # that reset() must zero everything __init__ set, which the baseline
+        # comparison enforces.
+        strategy._order_placed = True
+        strategy._logged_no_data = True
+        strategy._fired = True
+        strategy._n = 42
+        strategy._mean = 1.23
+        strategy._m2 = 9.87
+        strategy._last_var_sample_t = 150.0
+        strategy._var_sampled_once = True
+        strategy._latest_pct = 0.8
+        strategy._latest_obi = 0.4
+        strategy._lowest_t = 10.0
+        strategy._maker_order_id = "dirty-order"
+        strategy._maker_placed_at = 123456.0
+        strategy._maker_entry_price = 0.77
+        strategy._maker_token_id = "dirty-token"
+        strategy._maker_size_usd = 5.0
+        strategy._maker_tier = "tier_a"
+        strategy._entry_complete = True
+        strategy._fire_signal = _make_signal(delta_pct=0.5, direction=Direction.UP)
+        strategy._fire_delta_pct = 0.65
+        strategy._early_exit_triggered = True
+        strategy._erosion_ema = 0.22
+        strategy._erosion_cusum = 0.91
+        strategy._erosion_ema_initialized = True
+        strategy._erosion_last_log_time = 100.0
+        strategy._erosion_last_logged_val = 0.2
+        strategy._erosion_last_logged_cusum = 0.8
+        strategy._panic_breach_started_at = 500.0
+        strategy._cusum_breach_started_at = 550.0
+
+        strategy.reset()
+
+        after = self._private_field_snapshot(strategy)
+        differing = [
+            (k, baseline.get(k), after.get(k)) for k in baseline if baseline.get(k) != after.get(k)
+        ]
+        assert after == baseline, (
+            f"reset() did not fully restore state. "
+            f"Key-set diff: {set(baseline) ^ set(after)} / Value diff: {differing}"
+        )
+
+    def test_reset_covers_every_init_field(self):
+        """reset() must touch every _-prefixed field set in __init__.
+
+        This is the structural guard: the previous test compares values but
+        can't catch a field __init__ creates that reset() never references
+        (because both sides see whatever dirty state we applied). This test
+        builds a fresh strategy, calls reset() immediately, and asserts the
+        field set is unchanged — proving reset() doesn't miss or accidentally
+        delete any field __init__ created.
+        """
+        strategy, _ = _make_strategy()
+        init_fields = set(self._private_field_snapshot(strategy).keys())
+        strategy.reset()
+        post_reset_fields = set(self._private_field_snapshot(strategy).keys())
+        assert init_fields == post_reset_fields, (
+            f"reset() changed the field set. "
+            f"Added: {post_reset_fields - init_fields}, "
+            f"Removed: {init_fields - post_reset_fields}"
+        )

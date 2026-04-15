@@ -34,6 +34,22 @@ class ResolutionData(NamedTuple):
     final_price: float | None  # eventMetadata.finalPrice — close of resolved window
 
 
+def _harvest_task_result(task: asyncio.Task[float | None], label: str) -> float | None:
+    """Harvest a done asyncio Task without catching BaseException.
+
+    Uses ``cancelled()``/``exception()`` inspection so ``CancelledError``,
+    ``KeyboardInterrupt``, and ``SystemExit`` are never silently swallowed.
+    """
+    if task.cancelled():
+        log.debug("%s task was cancelled", label)
+        return None
+    exc = task.exception()
+    if exc is not None:
+        log.warning("%s task failed: %s", label, exc)
+        return None
+    return task.result()
+
+
 @dataclass(frozen=True, slots=True)
 class WindowInfo:
     window_ts: int
@@ -211,10 +227,7 @@ class WindowTracker:
         if self._prefetch_task is not None:
             if not self._prefetch_task.done():
                 return  # still in-flight, don't launch another
-            try:
-                result = self._prefetch_task.result()
-            except BaseException:  # task errors are non-fatal
-                result = None
+            result = _harvest_task_result(self._prefetch_task, "prefetch")
             self._prefetch_task = None
             if result is not None:
                 self._prefetch_price = result
@@ -251,10 +264,7 @@ class WindowTracker:
         if self._open_price_task is not None:
             if not self._open_price_task.done():
                 return None  # still in-flight
-            try:
-                result = self._open_price_task.result()
-            except BaseException:  # task errors are non-fatal
-                result = None
+            result = _harvest_task_result(self._open_price_task, "open_price")
             self._open_price_task = None
             if result is not None:
                 return result
@@ -312,10 +322,7 @@ class WindowTracker:
             and self._prefetch_task is not None
             and self._prefetch_task.done()
         ):
-            try:
-                open_price = self._prefetch_task.result()
-            except BaseException:  # task may have been cancelled
-                open_price = None
+            open_price = _harvest_task_result(self._prefetch_task, "prefetch")
             if open_price is not None:
                 log.info(
                     "window open price captured: %.2f (pre-fetched Gamma priceToBeat)",

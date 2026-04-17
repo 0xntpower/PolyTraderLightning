@@ -702,10 +702,12 @@ class TestJSONLRecords:
         content = jsonl_files[0].read_bytes().strip()
         record = orjson.loads(content)
         assert record["window_ts"] == 1000
-        assert record["fired"] is True
-        assert record["filled"] is True
-        assert "pnl" in record
-        assert "bankroll" in record
+        # Canonical paper-schema fields: rule_simulated_fill replaces "fired"+"filled",
+        # pnl_total/pnl_rules replace "pnl", balance_usd replaces "bankroll".
+        assert record["rule_simulated_fill"] is True
+        assert "pnl_total" in record
+        assert "pnl_rules" in record
+        assert "balance_usd" in record
 
 
 # ---------------------------------------------------------------------------
@@ -788,12 +790,13 @@ class TestJSONLPnLIncludesFee:
         assert len(jsonl_files) == 1
         record = json.loads(jsonl_files[0].read_text().strip())
 
-        # JSONL pnl must equal the result pnl (which includes fee)
-        assert record["pnl"] == result.pnl
+        # JSONL pnl_total must equal the result pnl (which includes fee)
+        assert record["pnl_total"] == result.pnl
+        assert record["pnl_rules"] == result.pnl
         # And it should NOT equal the raw calculation without fee
         shares = 10.0 / 0.85
         raw_pnl_no_fee = round(shares * (1.0 - 0.85), 4)
-        assert record["pnl"] != raw_pnl_no_fee
+        assert record["pnl_total"] != raw_pnl_no_fee
 
 
 # ---------------------------------------------------------------------------

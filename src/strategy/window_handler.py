@@ -388,7 +388,7 @@ class WindowEventHandler:
                 from execution.order_manager import OrderManager as _LiveMgr
 
                 _telemetry: KellyTelemetrySnapshot | None = None
-                _early_exit: tuple[float, float] | None = None
+                _early_exit: tuple[float, float, float, float] | None = None
                 if isinstance(order_mgr, _LiveMgr):
                     _telemetry = order_mgr.take_kelly_telemetry()
                     _early_exit = order_mgr.take_early_exit()
@@ -410,16 +410,16 @@ class WindowEventHandler:
                     signal_id=strategy.signal_cfg.signal_id,
                     kelly_telemetry=_telemetry,
                     window_delta_pct=_close_delta,
-                    early_exit_pnl=_early_exit[1] if _early_exit is not None else None,
                     early_exit_sell_price=_early_exit[0] if _early_exit is not None else None,
+                    early_exit_pnl=_early_exit[1] if _early_exit is not None else None,
+                    early_exit_residual_shares=_early_exit[2] if _early_exit is not None else 0.0,
+                    early_exit_residual_entry=_early_exit[3] if _early_exit is not None else 0.0,
+                    is_maker_entry=_live_fill.is_maker,
                 )
-                # Persist the pre-resolution snapshot immediately so the
-                # trade is recoverable if the bot dies before the Gamma
-                # API confirms. Resolution will append a finalized line;
-                # downstream analysis takes the last line per window_ts.
-                _pending = self._resolution_mgr.pending
-                if _pending is not None:
-                    self._resolution_mgr.write_pending_snapshot(_pending)
+                # Crash recovery between fill and resolution is covered by
+                # TradeJournal.record_trade below; the JSONL is written as a
+                # single definitive record at resolution time so live matches
+                # paper's one-line-per-window schema.
                 if (
                     _force_result is not None
                     and _force_result.verdict == "DEAD"
@@ -454,6 +454,29 @@ class WindowEventHandler:
                 traded=False,
                 mode=order_mgr.mode,
                 balance=self._bankroll_tracker.bankroll,
+            )
+            # Write a skip record so the live JSONL has one line per window,
+            # matching paper. Pull whatever Kelly telemetry was captured this
+            # window (empty dict for warmup / pre-sizing skips) and the close
+            # delta for downstream analysis.
+            from execution.order_manager import OrderManager as _LiveMgr
+
+            _skip_telemetry: KellyTelemetrySnapshot = {}
+            if isinstance(order_mgr, _LiveMgr):
+                _skip_telemetry = order_mgr.take_kelly_telemetry()
+            _skip_snap = state.end_snapshot
+            _skip_delta = (
+                compute_signal_from_snapshot(_skip_snap).delta_pct
+                if _skip_snap and _skip_snap.window_ts == last_window_ts
+                else compute_signal(state).delta_pct
+            )
+            _skip_outcome = _compute_snapshot_outcome(_skip_snap)
+            self._resolution_mgr.write_skipped_window_record(
+                window_ts=last_window_ts,
+                window_delta_pct=_skip_delta,
+                direction=sc.side.value,
+                kelly_telemetry=_skip_telemetry,
+                actual_outcome=_skip_outcome,
             )
 
         # Journal — paper records full outcome immediately; live records the

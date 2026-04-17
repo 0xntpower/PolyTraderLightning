@@ -355,9 +355,11 @@ class PaperOrderManager:
             # P&L from selling tokens at bid: (sell - buy) * quantity
             pnl += order.size * (sell_price - order.price)
             total_size += order.size
-            if not order.is_maker:
-                fee = self.fee_tracker.record_taker_fee(sell_price, order.size)
-                pnl -= fee
+
+        # Exit is always a taker action — the bid cross that fills the SELL pays
+        # a taker fee regardless of whether the entry was maker or taker.
+        fee = self.fee_tracker.record_taker_fee(sell_price, total_size)
+        pnl -= fee
 
         pnl = round(pnl, 4)
         rec = self._current_record

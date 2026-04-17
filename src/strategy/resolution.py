@@ -75,9 +75,16 @@ class PendingResolution:
     optimistic_counted: bool = False
     # Early-exit realized state — set when the position was sold mid-window via
     # CUSUM erosion trigger. When present, _resolve uses these instead of the
-    # $1/$0 resolution-based P&L calc and does not wait for Gamma.
+    # $1/$0 resolution-based P&L calc. If ``early_exit_residual_shares`` is 0
+    # the FAK fully filled and resolution short-circuits; if non-zero the FAK
+    # partially filled and we still wait for Gamma to settle the residual.
     early_exit_pnl: float | None = None
     early_exit_sell_price: float | None = None
+    early_exit_residual_shares: float = 0.0
+    early_exit_residual_entry: float = 0.0
+    # True if the originating entry order was maker (post-only GTC). Maker
+    # entries pay no taker fee at entry, so _resolve skips the fee deduction.
+    is_maker_entry: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -169,6 +176,9 @@ class ResolutionManager:
         window_delta_pct: float = 0.0,
         early_exit_pnl: float | None = None,
         early_exit_sell_price: float | None = None,
+        early_exit_residual_shares: float = 0.0,
+        early_exit_residual_entry: float = 0.0,
+        is_maker_entry: bool = False,
     ) -> ResolutionResult | None:
         """Create a new pending resolution, force-resolving any existing one first.
 
@@ -209,6 +219,9 @@ class ResolutionManager:
             optimistic_counted=optimistic_counted,
             early_exit_pnl=early_exit_pnl,
             early_exit_sell_price=early_exit_sell_price,
+            early_exit_residual_shares=early_exit_residual_shares,
+            early_exit_residual_entry=early_exit_residual_entry,
+            is_maker_entry=is_maker_entry,
         )
         log.info(
             "trade pending resolution: window=%d slug=%s "
@@ -235,10 +248,11 @@ class ResolutionManager:
 
         # Early-exit short-circuit: the position was sold mid-window via
         # ``exit_position_early``, so we already have realized P&L and don't
-        # need to wait for Gamma. Resolve immediately with a synthetic outcome
-        # (snapshot if available, else conservative). ``_resolve`` uses
-        # ``pr.early_exit_pnl`` and ignores the outcome-based calc.
-        if pr.early_exit_pnl is not None:
+        # need to wait for Gamma — unless the FAK partially filled, in which
+        # case the residual shares are still on-chain and must settle at the
+        # canonical $1/$0 outcome. Fall through to normal Gamma polling in
+        # that case; ``_resolve`` will blend realized + residual P&L.
+        if pr.early_exit_pnl is not None and pr.early_exit_residual_shares <= 0:
             synthetic_outcome = self._force_resolve_outcome(pr)
             result = self._resolve(pr, synthetic_outcome, mode=mode)
             await self._reconcile_bankroll(mode)
@@ -437,25 +451,48 @@ class ResolutionManager:
         if is_early_exit:
             # CUSUM sold the position mid-window. ``exit_position_early``
             # already recorded the sell-side taker fee on the fee tracker and
-            # computed realized P&L, so skip the $1/$0 resolution calc. SPRT
-            # counts early exits by the sign of realized P&L — a profitable
-            # exit is a "win", an erosion-driven loss exit is a "loss".
+            # computed realized P&L on the filled portion. If the FAK partially
+            # filled, the residual shares are still on-chain and settle at the
+            # canonical $1/$0 outcome — add that in here. SPRT counts the
+            # combined outcome by its sign.
             assert pr.early_exit_pnl is not None  # noqa: S101  # is_early_exit invariant
-            pnl = pr.early_exit_pnl
+            realized_pnl = pr.early_exit_pnl
+            residual_pnl = 0.0
+            if pr.early_exit_residual_shares > 0 and pr.early_exit_residual_entry > 0:
+                # Residual inherits the original entry tier's fee treatment:
+                # maker entries paid no fee, taker entries already paid at
+                # entry. No new fee at resolution.
+                resid_shares = pr.early_exit_residual_shares
+                resid_entry = pr.early_exit_residual_entry
+                if outcome == sc.side.value:
+                    residual_pnl = resid_shares * (1.0 - resid_entry)
+                else:
+                    residual_pnl = -(resid_shares * resid_entry)
+            pnl = round(realized_pnl + residual_pnl, 4)
             won = pnl > 0
             log.info(
-                "live early-exit resolution: window=%d side=%s sell=%.4f pnl=$%.4f "
+                "live early-exit resolution: window=%d side=%s sell=%.4f "
+                "realized=$%.4f residual_shares=%.2f residual_pnl=$%.4f total=$%.4f "
                 "(snapshot_outcome=%s market_outcome=%s)",
                 pr.window_ts,
                 sc.side.value,
                 pr.early_exit_sell_price or 0.0,
+                realized_pnl,
+                pr.early_exit_residual_shares,
+                residual_pnl,
                 pnl,
                 pr.snapshot_outcome,
                 outcome,
             )
         else:
-            # Taker fee deduction
-            taker_fee = self._fee_tracker.record_taker_fee(entry_price, shares)
+            # Entry-side taker fee: only charged when the entry order filled as
+            # a taker. Maker (post-only GTC) entries pay no fee at entry, and
+            # binary resolution isn't a new trade, so no exit fee applies either.
+            taker_fee = (
+                0.0
+                if pr.is_maker_entry
+                else self._fee_tracker.record_taker_fee(entry_price, shares)
+            )
 
             bet_won = outcome == sc.side.value
             if bet_won:
@@ -467,7 +504,7 @@ class ResolutionManager:
 
             log.info(
                 "live resolution: window=%d side=%s outcome=%s → %s pnl=$%.4f "
-                "(entry=%.2f shares=%.1f taker_fee=$%.4f)",
+                "(entry=%.2f shares=%.1f taker_fee=$%.4f maker_entry=%s)",
                 pr.window_ts,
                 sc.side.value,
                 outcome,
@@ -476,6 +513,7 @@ class ResolutionManager:
                 entry_price,
                 shares,
                 taker_fee,
+                pr.is_maker_entry,
             )
 
         # Drain the optimistic pre-resolution feedback entry before appending
@@ -640,54 +678,40 @@ class ResolutionManager:
             signal_age_windows=pr.signal_age_windows,
         )
 
-    def write_pending_snapshot(self, pr: PendingResolution) -> None:
-        """Write an optimistic pre-resolution JSONL record at fill time.
-
-        Mirrors paper's immediate _finalize_paper_window write so a crash
-        between fill and resolution doesn't lose the trade evidence. The
-        record is marked ``pending=True``; a second line with the resolved
-        outcome and pnl gets appended when the market resolves. Downstream
-        analysis tools take the last line per ``window_ts``.
-        """
-        self._write_live_window_record(pr, outcome=None, pnl=None, pending=True)
-
     def _write_live_window_record(
         self,
         pr: PendingResolution,
         outcome: str | None,
         pnl: float | None,
-        *,
-        pending: bool = False,
     ) -> None:
-        """Write a per-window JSONL record for live mode.
+        """Write a per-window JSONL record for a resolved live trade.
 
-        Mirrors the paper WindowRecord schema so post-session analysis tools
-        can parse both sources without mode-specific branching. When
-        ``pending`` is True, ``outcome`` and ``pnl`` are recorded as None;
-        the final write after resolution supersedes this line.
+        Emits the exact field names used by paper's WindowRecord writer so
+        downstream analysis tools parse both modes identically. Crash
+        recovery between fill and resolution is handled by ``TradeJournal``,
+        so this is a single definitive write per window — no pending
+        pre-record.
         """
-        self._results_dir.mkdir(parents=True, exist_ok=True)
-        date_str = datetime.fromtimestamp(pr.window_ts, tz=UTC).strftime("%Y-%m-%d")
-        path = self._results_dir / f"{date_str}.jsonl"
-
         t = pr.kelly_telemetry
+        bankroll_after = round(self._bankroll_tracker.bankroll, 4)
+        bankroll_before_tel = t.get("bankroll_before")
+        bankroll_before = round(bankroll_before_tel, 4) if bankroll_before_tel is not None else None
+        side = pr.signal_cfg.side.value
         data: dict[str, Any] = {
             "window_ts": pr.window_ts,
             "window_delta_pct": pr.window_delta_pct,
-            "direction": outcome,
-            "actual_outcome": outcome,
-            "fired": True,
-            "filled": True,
-            "pending": pending,
-            "pnl": pnl,
-            "entry_price": pr.entry_price,
-            "size_usd": pr.size_usd,
-            "early_exit": pr.early_exit_pnl is not None,
-            "early_exit_sell_price": pr.early_exit_sell_price,
-            "bankroll": round(self._bankroll_tracker.bankroll, 4),
-            "signal_features": t.get("rule_signal_features"),
+            "direction": side,
             "rule_triggered": t.get("rule_triggered"),
-            "rule_direction": t.get("rule_direction"),
+            "rule_direction": t.get("rule_direction", side),
+            "rule_entry_price": pr.entry_price,
+            "rule_simulated_fill": True,
+            "rule_signal_features": t.get("rule_signal_features"),
+            "actual_outcome": outcome,
+            "pnl_rules": pnl if pnl is not None else 0.0,
+            "pnl_total": pnl if pnl is not None else 0.0,
+            "latency_signal_ms": None,
+            "latency_order_ms": None,
+            "balance_usd": bankroll_after,
             "kelly_adjusted_p": t.get("kelly_adjusted_p"),
             "kelly_vol_discount": t.get("kelly_vol_discount"),
             "kelly_chop_discount": t.get("kelly_chop_discount"),
@@ -699,14 +723,75 @@ class ResolutionManager:
             "kelly_bet_size": t.get("kelly_bet_size"),
             "kelly_entry_price": t.get("kelly_entry_price"),
             "kelly_has_edge": t.get("kelly_has_edge"),
-            "bankroll_before": t.get("bankroll_before"),
+            "bankroll_before": bankroll_before,
+            "bankroll_after": bankroll_after,
             "sprt_factor": t.get("sprt_factor", 1.0),
-            "final_bet_size": t.get("final_bet_size"),
+            "final_bet_size": t.get("final_bet_size", pr.size_usd),
+            "early_exit": pr.early_exit_pnl is not None,
+            "early_exit_sell_price": pr.early_exit_sell_price,
         }
+        self._append_jsonl(pr.window_ts, data)
 
+    def write_skipped_window_record(
+        self,
+        window_ts: int,
+        window_delta_pct: float,
+        direction: str,
+        kelly_telemetry: KellyTelemetrySnapshot,
+        actual_outcome: str | None,
+    ) -> None:
+        """Write a skip/no-fill JSONL line for live mode.
+
+        Paper writes one record per window (including skips); live now
+        matches that so session-level analysis (SKIP rates, coverage
+        counts) produces identical results across modes.
+        """
+        t = kelly_telemetry
+        bankroll_after = round(self._bankroll_tracker.bankroll, 4)
+        bankroll_before_tel = t.get("bankroll_before")
+        bankroll_before = round(bankroll_before_tel, 4) if bankroll_before_tel is not None else None
+        data: dict[str, Any] = {
+            "window_ts": window_ts,
+            "window_delta_pct": window_delta_pct,
+            "direction": direction,
+            "rule_triggered": t.get("rule_triggered"),
+            "rule_direction": t.get("rule_direction", ""),
+            "rule_entry_price": 0.0,
+            "rule_simulated_fill": False,
+            "rule_signal_features": t.get("rule_signal_features"),
+            "actual_outcome": actual_outcome,
+            "pnl_rules": 0.0,
+            "pnl_total": 0.0,
+            "latency_signal_ms": None,
+            "latency_order_ms": None,
+            "balance_usd": bankroll_after,
+            "kelly_adjusted_p": t.get("kelly_adjusted_p"),
+            "kelly_vol_discount": t.get("kelly_vol_discount"),
+            "kelly_chop_discount": t.get("kelly_chop_discount"),
+            "kelly_outcome_discount": t.get("kelly_outcome_discount"),
+            "kelly_total_discount": t.get("kelly_total_discount"),
+            "kelly_feedback_adj": t.get("kelly_feedback_adj"),
+            "kelly_raw_f": t.get("kelly_raw_f"),
+            "kelly_fractional_f": t.get("kelly_fractional_f"),
+            "kelly_bet_size": t.get("kelly_bet_size"),
+            "kelly_entry_price": t.get("kelly_entry_price"),
+            "kelly_has_edge": t.get("kelly_has_edge"),
+            "bankroll_before": bankroll_before,
+            "bankroll_after": bankroll_after,
+            "sprt_factor": t.get("sprt_factor", 1.0),
+            "final_bet_size": t.get("final_bet_size", 0.0),
+            "early_exit": False,
+            "early_exit_sell_price": None,
+        }
+        self._append_jsonl(window_ts, data)
+
+    def _append_jsonl(self, window_ts: int, data: dict[str, Any]) -> None:
+        self._results_dir.mkdir(parents=True, exist_ok=True)
+        date_str = datetime.fromtimestamp(window_ts, tz=UTC).strftime("%Y-%m-%d")
+        path = self._results_dir / f"{date_str}.jsonl"
         try:
             with open(path, "ab") as f:
                 f.write(orjson.dumps(data))
                 f.write(b"\n")
         except OSError as exc:
-            log.warning("failed to write live window record: %s", exc)
+            log.warning("failed to write window record for %d: %s", window_ts, exc)

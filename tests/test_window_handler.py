@@ -78,7 +78,7 @@ class FakeResolutionManager:
         self._create_result = None
         self._force_resolve_calls = []
         self._pending = None
-        self._snapshot_writes = []
+        self._skip_writes = []
 
     @property
     def is_pending(self):
@@ -94,8 +94,8 @@ class FakeResolutionManager:
     def force_resolve(self, **kwargs):
         self._force_resolve_calls.append(kwargs)
 
-    def write_pending_snapshot(self, pr):
-        self._snapshot_writes.append(pr)
+    def write_skipped_window_record(self, **kwargs):
+        self._skip_writes.append(kwargs)
 
 
 class FakePositionTracker:
@@ -693,6 +693,7 @@ class FakeLiveFill:
     price: float = 0.84
     size: float = 10.0
     size_usd: float = 8.40
+    is_maker: bool = False
 
 
 class TestLiveTradeOutcome:

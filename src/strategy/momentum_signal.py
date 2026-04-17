@@ -936,19 +936,27 @@ class MomentumSignalStrategy:
                 )
                 return
 
-            # v3.0 P6 / v3.1 hostile-regime stack. The regime cap already
+            # v3.0 P6 / v3.1 / v3.2 hostile-regime stack. The regime cap already
             # reduces adjusted_p (and therefore raw Kelly); on top of that:
-            #   - severity > skip_threshold (v3.1): abort the fire entirely
-            #   - severity > hostile_regime_threshold (v3.0): halve bet dollars
-            # Evaluated once here so the metric and the band boundaries stay
-            # consistent across the skip and the multiplier paths.
-            _hostile_metric = max(
+            #   - skip-metric > skip_threshold: abort the fire entirely
+            #   - halve-metric > hostile_regime_threshold: halve bet dollars
+            # v3.2: outcome_discount participates in the halve metric (v3.1
+            # T4 lost $22 with outcome_sev=0.381 that the halve gate ignored)
+            # but NOT in the skip metric — outcome's empirical cap sits near
+            # the skip threshold, and skipping on outcome alone kills too many
+            # real wins (v3.1 T5/T7/T9). Vol/chop keep their full skip path.
+            _hostile_halve_metric = max(
+                self.kelly_wr_result.vol_discount,
+                self.kelly_wr_result.chop_discount,
+                self.kelly_wr_result.outcome_discount,
+            )
+            _hostile_skip_metric = max(
                 self.kelly_wr_result.vol_discount,
                 self.kelly_wr_result.chop_discount,
             )
             _hostile_threshold = self.sizing_cfg.hostile_regime_threshold
             _hostile_skip_threshold = self.sizing_cfg.hostile_regime_skip_threshold
-            if _hostile_skip_threshold > 0.0 and _hostile_metric > _hostile_skip_threshold:
+            if _hostile_skip_threshold > 0.0 and _hostile_skip_metric > _hostile_skip_threshold:
                 log.info(
                     "[SKIP] rank=%d side=%s reason=HOSTILE_REGIME_SKIP "
                     "vol=%.3f chop=%.3f max=%.3f > skip_thresh=%.3f",
@@ -956,11 +964,11 @@ class MomentumSignalStrategy:
                     sc.side.value,
                     self.kelly_wr_result.vol_discount,
                     self.kelly_wr_result.chop_discount,
-                    _hostile_metric,
+                    _hostile_skip_metric,
                     _hostile_skip_threshold,
                 )
                 return
-            if _hostile_metric > _hostile_threshold:
+            if _hostile_halve_metric > _hostile_threshold:
                 _hostile_mult = self.sizing_cfg.hostile_regime_multiplier
                 _pre = kr.bet_size
                 kr = KellyResult(
@@ -972,11 +980,12 @@ class MomentumSignalStrategy:
                 )
                 self.last_kelly_result = kr
                 log.info(
-                    "HOSTILE REGIME: vol=%.3f chop=%.3f max=%.3f > thresh=%.3f "
+                    "HOSTILE REGIME: vol=%.3f chop=%.3f outcome=%.3f max=%.3f > thresh=%.3f "
                     "— bet $%.2f -> $%.2f (x%.2f)",
                     self.kelly_wr_result.vol_discount,
                     self.kelly_wr_result.chop_discount,
-                    _hostile_metric,
+                    self.kelly_wr_result.outcome_discount,
+                    _hostile_halve_metric,
                     _hostile_threshold,
                     _pre,
                     kr.bet_size,

@@ -188,6 +188,7 @@ def _handle_trade(data: _TradeEventMsg, state: MarketState) -> None:
         size_usd=fill_usd,
         fill_time=now,
         confirmed=(status == "CONFIRMED"),
+        is_maker=matched_id in state.maker_order_ids,
     )
 
     fill = state.live_fills[matched_id]

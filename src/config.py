@@ -134,15 +134,20 @@ sizing:
   chop_weight: 1.0               # regime weight for chop (0-1)
   outcome_weight: 0.8            # regime weight for outcome bias (0-1)
   feedback_min_trades: 10        # trades before performance feedback activates
-  # v3.0 P6: hostile regime double-cap. When vol_disc or chop_disc exceed
-  # hostile_regime_threshold (severity*weight above the floor), bet dollars
-  # are multiplied by hostile_regime_multiplier in addition to the regime
-  # cap reducing adjusted_p. Protects against sizing through storms.
-  hostile_regime_threshold: 0.20
+  # v3.0 P6 / v3.2: hostile regime double-cap. When max(vol_disc, chop_disc,
+  # outcome_disc) exceeds hostile_regime_threshold, bet dollars are
+  # multiplied by hostile_regime_multiplier in addition to the regime cap
+  # reducing adjusted_p. Threshold lowered from 0.20 to 0.15 after v3.1
+  # paper loss (T3 at 0.161 went untouched); outcome_disc added to the max
+  # after T4 lost $22 with outcome_sev=0.381 that the v3.1 gate ignored.
+  hostile_regime_threshold: 0.15
   hostile_regime_multiplier: 0.5
-  # v3.1: hostile-regime SKIP gate. Above this severity the fire is aborted
-  # entirely instead of merely halved. Leaves a [hostile_regime_threshold,
-  # hostile_regime_skip_threshold) halving band intact. 0 disables.
+  # v3.1: hostile-regime SKIP gate. When max(vol_disc, chop_disc) exceeds
+  # this value the fire is aborted entirely instead of merely halved.
+  # outcome_disc is deliberately excluded from the skip metric (it only
+  # participates in halving) because outcome's empirical cap sits near the
+  # skip threshold and skipping on it alone killed v3.1 T5/T7/T9 wins in
+  # the counterfactual. Leaves a halving band intact. 0 disables.
   hostile_regime_skip_threshold: 0.25
 
 # ---------------------------------------------------------------------------
@@ -304,18 +309,19 @@ class SizingConfig:
     chop_weight: float = 1.0  # regime weight for chop (0-1)
     outcome_weight: float = 0.8  # regime weight for outcome bias (0-1)
     feedback_min_trades: int = 10  # trades before performance feedback
-    # v3.0 P6: double regime cap when vol or chop severity is hostile. The
-    # regime cap alone only tips adjusted_p; hostile conditions additionally
-    # scale the final bet dollars to avoid sizing through a storm.
-    hostile_regime_threshold: float = 0.20  # severity*weight above which hostile
+    # v3.0 P6 / v3.2: double regime cap when vol, chop, OR outcome severity
+    # is hostile. The regime cap alone only tips adjusted_p; hostile
+    # conditions additionally scale the final bet dollars to avoid sizing
+    # through a storm. Threshold tightened from 0.20 to 0.15 after v3.1
+    # T3 loss at severity 0.161 bypassed the gate.
+    hostile_regime_threshold: float = 0.15  # severity*weight above which hostile
     hostile_regime_multiplier: float = 0.5  # multiplier applied to bet dollars
     # v3.1: hostile-regime SKIP gate. When vol or chop severity exceeds this
-    # value the fire is aborted entirely instead of being halved. v3.0 paper
-    # session had one hostile fire at vol_sev=0.274 that lost the full halved
-    # bet (-$25.18 of -$25.79 net). Tier-1 analysis showed skipping fires above
-    # 0.25 turns +$5.79 into ~+$30.80 without touching any non-hostile win.
-    # Must exceed hostile_regime_threshold to leave a halving band intact.
-    # 0 disables the skip.
+    # value the fire is aborted entirely instead of being halved. outcome
+    # severity does NOT participate in this metric — the halve path already
+    # covers it, and skipping on outcome alone would have killed real wins
+    # (v3.1 T5/T7/T9 all had outcome_sev=0.381). Must exceed
+    # hostile_regime_threshold to leave a halving band intact. 0 disables.
     hostile_regime_skip_threshold: float = 0.25
 
 

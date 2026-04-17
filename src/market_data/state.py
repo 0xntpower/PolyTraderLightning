@@ -30,6 +30,9 @@ class LiveFill:  # mutable: confirmed field updated on CLOB status transitions (
     size_usd: float  # accumulated USDC spent (price * size per partial fill)
     fill_time: float  # timestamp of first fill event
     confirmed: bool = False  # True once status reaches CONFIRMED
+    # Whether the originating order was maker (post-only GTC) vs taker (FOK).
+    # Read at resolution time to gate the entry-side taker fee in _resolve.
+    is_maker: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,6 +101,11 @@ class MarketState:
 
     # Active order IDs for this window
     active_order_ids: list[str] = field(default_factory=list)
+
+    # Subset of active_order_ids that were placed as maker (post-only GTC).
+    # The CLOB user WS stamps LiveFill.is_maker by looking up this set when
+    # it matches a BUY fill, so resolution can gate the entry taker fee.
+    maker_order_ids: set[str] = field(default_factory=set)
 
     # Confirmed fills from the CLOB user WebSocket, keyed by order_id
     live_fills: dict[str, LiveFill] = field(default_factory=dict)
@@ -188,6 +196,7 @@ class MarketState:
         self.position_up = 0.0
         self.position_down = 0.0
         self.active_order_ids.clear()
+        self.maker_order_ids.clear()
         self.live_fills.clear()
         self.best_bid_up = 0.0
         self.best_ask_up = 0.0

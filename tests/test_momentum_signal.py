@@ -916,9 +916,11 @@ class TestCusumReversalGate:
 
 
 class TestHostileRegimeCap:
-    """When vol_discount or chop_discount exceeds hostile_regime_threshold,
-    the final Kelly bet is scaled by hostile_regime_multiplier on top of
-    the regime cap. Applied once inside the sizing block before SPRT.
+    """When max(vol_discount, chop_discount, outcome_discount) exceeds
+    hostile_regime_threshold, the final Kelly bet is scaled by
+    hostile_regime_multiplier on top of the regime cap. Applied once inside
+    the sizing block before SPRT. v3.2: outcome_discount joined the max
+    after v3.1 T4's outcome-driven loss.
     """
 
     @staticmethod
@@ -926,7 +928,8 @@ class TestHostileRegimeCap:
         *,
         vol_discount: float = 0.0,
         chop_discount: float = 0.0,
-        hostile_threshold: float = 0.20,
+        outcome_discount: float = 0.0,
+        hostile_threshold: float = 0.15,
         hostile_multiplier: float = 0.5,
         hostile_skip_threshold: float = 0.0,
     ) -> tuple[MomentumSignalStrategy, FakeOrderExecutor]:
@@ -941,7 +944,7 @@ class TestHostileRegimeCap:
             adjusted_p=0.88,
             vol_discount=vol_discount,
             chop_discount=chop_discount,
-            outcome_discount=0,
+            outcome_discount=outcome_discount,
             total_discount=0,
             feedback_adjustment=0,
             regime_ready=True,
@@ -1003,9 +1006,9 @@ class TestHostileRegimeCap:
         assert hostile_size == pytest.approx(benign_size * 0.5, rel=0.02)
 
     @pytest.mark.asyncio
-    async def test_max_metric_wins_between_vol_and_chop(self):
-        """The gate uses max(vol, chop); either one above the threshold trips it."""
-        # vol benign, chop hostile → still triggers.
+    async def test_max_metric_wins_between_vol_chop_outcome(self):
+        """The halve gate uses max(vol, chop, outcome); any one above the
+        threshold trips it."""
         strategy, executor = self._build(vol_discount=0.05, chop_discount=0.40)
         await _run_fire(strategy, executor)
         assert strategy.last_kelly_result is not None
@@ -1015,6 +1018,21 @@ class TestHostileRegimeCap:
         assert executor.calls[0].size_usd == pytest.approx(
             benign_exec.calls[0].size_usd * 0.5, rel=0.02
         )
+
+    @pytest.mark.asyncio
+    async def test_outcome_above_threshold_halves_bet(self):
+        """v3.2: outcome_discount alone can trip the halve gate. Before v3.2
+        this feature was ignored — v3.1 T4 lost $22 with outcome_sev=0.381
+        because the gate only watched vol and chop."""
+        benign_strat, benign_exec = self._build(outcome_discount=0.05)
+        await _run_fire(benign_strat, benign_exec)
+        benign_size = benign_exec.calls[0].size_usd
+
+        hostile_strat, hostile_exec = self._build(outcome_discount=0.38)
+        await _run_fire(hostile_strat, hostile_exec)
+        hostile_size = hostile_exec.calls[0].size_usd
+
+        assert hostile_size == pytest.approx(benign_size * 0.5, rel=0.02)
 
     @pytest.mark.asyncio
     async def test_threshold_exactly_equal_does_not_trip(self):
@@ -1113,6 +1131,20 @@ class TestHostileRegimeSkip:
         strategy, executor = TestHostileRegimeCap._build(
             vol_discount=0.50,
             hostile_skip_threshold=0.0,
+        )
+        await _run_fire(strategy, executor)
+        assert len(executor.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_outcome_alone_does_not_skip(self):
+        """v3.2: outcome_discount participates in halving but NOT in the
+        skip metric. An outcome severity well above skip_threshold must
+        still fire (halved), not abort. Rationale: outcome's empirical cap
+        is near the skip threshold; skipping on outcome alone would have
+        killed v3.1 T5/T7/T9 wins (all outcome_sev=0.381)."""
+        strategy, executor = TestHostileRegimeCap._build(
+            outcome_discount=0.40,
+            hostile_skip_threshold=0.25,
         )
         await _run_fire(strategy, executor)
         assert len(executor.calls) == 1

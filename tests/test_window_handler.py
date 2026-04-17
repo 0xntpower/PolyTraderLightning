@@ -368,6 +368,9 @@ class FakeConfig:
 class FakeRiskConfig:
     max_consecutive_losses = 5
     cancel_unfilled_at_sec = 10
+    post_loss_cooldown_enabled = False
+    post_loss_cooldown_loss_pct = 2.0
+    post_loss_cooldown_windows = 1
 
 
 class FakeConnectionsConfig:
@@ -384,6 +387,8 @@ class FakeConnectionsConfig:
 
 def _make_handler(**overrides):
     """Create a WindowEventHandler with all-fake dependencies."""
+    from strategy.post_loss_cooldown import PostLossCooldown
+
     defaults = {
         "cfg": FakeConfig(),
         "state": FakeMarketState(),
@@ -409,6 +414,9 @@ def _make_handler(**overrides):
         "bot_start_time": 0.0,
         "build_strategy_fn": lambda cfg, state, data: None,
         "signal_cfg_to_dict_fn": lambda sc: {},
+        "post_loss_cooldown": PostLossCooldown(
+            enabled=False, loss_pct_threshold=2.0, cooldown_windows=1
+        ),
     }
     defaults.update(overrides)
     return WindowEventHandler(**defaults)

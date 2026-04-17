@@ -190,6 +190,13 @@ def resolution_env(tmp_path):
     paths = FakeDataPaths(state=tmp_path / "state.json")
 
     state = MarketState()
+    from strategy.post_loss_cooldown import PostLossCooldown
+
+    post_loss_cooldown = PostLossCooldown(
+        enabled=False,
+        loss_pct_threshold=2.0,
+        cooldown_windows=1,
+    )
     mgr = ResolutionManager(
         window_tracker=window_tracker,
         state=state,
@@ -205,6 +212,7 @@ def resolution_env(tmp_path):
         cfg=cfg,
         paths=paths,
         optimistic_outcomes=optimistic_outcomes,
+        post_loss_cooldown=post_loss_cooldown,
     )
 
     return {

@@ -55,6 +55,7 @@ from strategy.monitors import (
     SessionAccumulator,
     SkipStreakTracker,
 )
+from strategy.post_loss_cooldown import PostLossCooldown
 from strategy.regime import RegimeManager
 from strategy.resolution import ResolutionManager
 from strategy.signal import compute_signal
@@ -758,6 +759,15 @@ async def _strategy_loop(
         _live_mgr = order_mgr
         _balance_refresher = _live_mgr.refresh_balance
 
+    # v3.2 §5.8: post-loss cooldown — freezes trading for N windows after a
+    # loss larger than post_loss_cooldown_loss_pct of bankroll. Shared between
+    # ResolutionManager (live path) and WindowEventHandler (paper path).
+    post_loss_cooldown = PostLossCooldown(
+        enabled=cfg.risk.post_loss_cooldown_enabled,
+        loss_pct_threshold=cfg.risk.post_loss_cooldown_loss_pct,
+        cooldown_windows=cfg.risk.post_loss_cooldown_windows,
+    )
+
     resolution_mgr = ResolutionManager(
         window_tracker=window_tracker,
         state=state,
@@ -773,6 +783,7 @@ async def _strategy_loop(
         cfg=cfg,
         paths=paths,
         optimistic_outcomes=optimistic_outcomes,
+        post_loss_cooldown=post_loss_cooldown,
         balance_refresher=_balance_refresher,
     )
 
@@ -803,6 +814,7 @@ async def _strategy_loop(
         bot_start_time=_bot_start_time,
         build_strategy_fn=_build_strategy_from_dict,
         signal_cfg_to_dict_fn=_signal_cfg_to_dict,
+        post_loss_cooldown=post_loss_cooldown,
     )
 
     # Latency report timer (every 60 minutes)
@@ -1158,6 +1170,12 @@ async def _strategy_loop(
             # Skip strategy evaluation when in IDLE state (fire stall or decay)
             if lifecycle.is_idle:
                 lifecycle.tick_shadow(signal, time_remaining)
+                await asyncio.sleep(STRATEGY_TICK_INTERVAL)
+                continue
+
+            # v3.2 §5.8: skip while the post-loss cooldown is active. Arming
+            # + decrement is handled inside WindowEventHandler.
+            if post_loss_cooldown.is_frozen:
                 await asyncio.sleep(STRATEGY_TICK_INTERVAL)
                 continue
 

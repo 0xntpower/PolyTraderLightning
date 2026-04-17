@@ -83,6 +83,14 @@ risk:
   max_consecutive_losses: 10
   cancel_unfilled_at_sec: 5
   max_position_per_window_usd: 75.0
+  # v3.2 §5.8: post-loss cooldown. After a settled loss whose magnitude
+  # exceeds ``post_loss_cooldown_loss_pct`` of bankroll, freeze trading
+  # for the next ``post_loss_cooldown_windows`` window(s). Meant to
+  # break tail-loss clusters where successive fires compound into the
+  # same regime shift. Set windows to 0 to disable.
+  post_loss_cooldown_enabled: true
+  post_loss_cooldown_loss_pct: 2.0
+  post_loss_cooldown_windows: 1
 
 # ---------------------------------------------------------------------------
 # Data connections
@@ -305,6 +313,15 @@ class RiskConfig:
     max_consecutive_losses: int = 10
     cancel_unfilled_at_sec: int = 5
     max_position_per_window_usd: float = 75.0
+    # v3.2 §5.8: post-loss cooldown. After a settled loss whose magnitude
+    # exceeds ``post_loss_cooldown_loss_pct`` of bankroll, freeze trading
+    # for the next ``post_loss_cooldown_windows`` window(s). Intended to
+    # break tail-loss clusters where successive fires compound into the
+    # same regime shift (v3.1 T3/T4 back-to-back losses). Set windows to
+    # 0 or enabled=False to disable.
+    post_loss_cooldown_enabled: bool = True
+    post_loss_cooldown_loss_pct: float = 2.0
+    post_loss_cooldown_windows: int = 1
 
 
 @dataclass(frozen=True, slots=True)

@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     from strategy.kelly import BankrollTracker
     from strategy.momentum_signal import MomentumSignalConfig
     from strategy.monitors import ConsecutiveLossTracker, SessionAccumulator
+    from strategy.post_loss_cooldown import PostLossCooldown
     from strategy.window_tracker import WindowTracker
 
     BalanceRefresher = Callable[[], Awaitable[float | None]]
@@ -120,6 +121,7 @@ class ResolutionManager:
         cfg: Config,
         paths: DataPaths,
         optimistic_outcomes: deque[int],
+        post_loss_cooldown: PostLossCooldown,
         balance_refresher: BalanceRefresher | None = None,
     ) -> None:
         self._window_tracker = window_tracker
@@ -137,6 +139,7 @@ class ResolutionManager:
         self._cfg = cfg
         self._paths = paths
         self._balance_refresher = balance_refresher
+        self._post_loss_cooldown = post_loss_cooldown
         self._pending: PendingResolution | None = None
         self._last_result: ResolutionResult | None = None
 
@@ -528,6 +531,9 @@ class ResolutionManager:
         # update_win/update_loss and let ``_reconcile_bankroll`` (called after
         # _resolve in tick()/window_handler) pull the authoritative on-chain
         # balance. Still record the outcome in recent_outcomes for Kelly.
+        # Capture bankroll BEFORE updates so the post-loss cooldown sees
+        # the pre-loss denominator (v3.2 §5.8).
+        bankroll_before = self._bankroll_tracker.bankroll
         if is_early_exit:
             if won:
                 self._recent_outcomes.append(1)
@@ -539,6 +545,12 @@ class ResolutionManager:
         else:
             self._bankroll_tracker.update_loss(size_usd, entry_price, fee=taker_fee)
             self._recent_outcomes.append(0)
+
+        # v3.2 §5.8 post-loss cooldown — arm after any settled loss (live or
+        # early-exit) large enough to clear the configured threshold. Paper
+        # mode arms via ``WindowEventHandler._process_trade_outcome``.
+        if not won and pnl < 0.0:
+            self._post_loss_cooldown.register_loss(-pnl, bankroll_before)
 
         # Position tracker
         self._position_tracker.record_window(

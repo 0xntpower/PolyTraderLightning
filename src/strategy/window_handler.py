@@ -55,6 +55,7 @@ if TYPE_CHECKING:
         SessionAccumulator,
         SkipStreakTracker,
     )
+    from strategy.post_loss_cooldown import PostLossCooldown
     from strategy.resolution import ResolutionManager
     from strategy.signal_lifecycle import SignalLifecycle
     from strategy.window_tracker import WindowTracker
@@ -143,6 +144,7 @@ class WindowEventHandler:
             MomentumSignalStrategy | None,
         ],
         signal_cfg_to_dict_fn: Callable[[MomentumSignalConfig], dict[str, object]],
+        post_loss_cooldown: PostLossCooldown,
         fast_vol_tracker: EwmaVolatilityTracker | None = None,
     ) -> None:
         self._cfg = cfg
@@ -170,10 +172,16 @@ class WindowEventHandler:
         self._bot_start_time = bot_start_time
         self._build_strategy_fn = build_strategy_fn
         self._signal_cfg_to_dict_fn = signal_cfg_to_dict_fn
+        self._post_loss_cooldown = post_loss_cooldown
 
         # Mutable state managed by the handler
         self._warmup_alert_sent = False
         self._last_bankroll_sync = 0.0
+
+    @property
+    def is_frozen_by_cooldown(self) -> bool:
+        """True while a post-loss cooldown window is active (v3.2 §5.8)."""
+        return self._post_loss_cooldown.is_frozen
 
     async def on_window_transition(
         self,
@@ -194,6 +202,11 @@ class WindowEventHandler:
 
         Returns WindowTransitionResult with potentially updated strategy/decay_detector.
         """
+        # v3.2 §5.8: decrement the post-loss cooldown at the TOP of the
+        # transition, before outcome processing can re-arm it. A loss
+        # resolved this window arms the counter for the NEXT window.
+        self._post_loss_cooldown.on_window_boundary()
+
         # Phase 1: Finalize previous window (paper mode)
         if last_window_ts > 0:
             self._finalize_previous_window(order_mgr, last_window_ts, strategy)
@@ -582,6 +595,9 @@ class WindowEventHandler:
             _kelly_size = strategy.last_size_usd
             _kelly_shares = _kelly_size / _kelly_entry if _kelly_entry > 0 else 0.0
             _kelly_fee = self._fee_tracker.compute_taker_fee(_kelly_entry, _kelly_shares)
+            # Snapshot bankroll BEFORE update_loss so the cooldown sees the
+            # pre-loss denominator (v3.2 §5.8).
+            _bankroll_before = self._bankroll_tracker.bankroll
             if won:
                 self._recent_outcomes.append(1)
                 if _kelly_entry > 0 and _kelly_size > 0:
@@ -590,6 +606,8 @@ class WindowEventHandler:
                 self._recent_outcomes.append(0)
                 if _kelly_entry > 0 and _kelly_size > 0:
                     self._bankroll_tracker.update_loss(_kelly_size, _kelly_entry, fee=_kelly_fee)
+                if pnl < 0.0:
+                    self._post_loss_cooldown.register_loss(-pnl, _bankroll_before)
 
             # v2.9 Kelly/paper bankroll reconcile. In paper mode the
             # authoritative balance is PaperOrderManager._balance, which is

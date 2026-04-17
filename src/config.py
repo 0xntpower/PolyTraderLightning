@@ -58,6 +58,15 @@ rules_strategy:
   # missing the window (e.g. delta crossing threshold ~5s late) still fires.
   narrow_observe_window_threshold_s: 60.0
   post_observe_grace_s: 10.0
+  # v3.2 §5.7: rolling-window Binance OBI gate. The per-signal
+  # require_obi_confirmation reads _latest_obi (spot, noisy, can flip on a
+  # single depth update). This gate averages OBI over the last N seconds and
+  # skips when the smoothed value opposes signal direction. Complements, does
+  # not replace, the spot confirmation.
+  obi_rolling_gate_enabled: true
+  obi_rolling_window_s: 20.0     # 10-30s recommendation range
+  obi_rolling_min_samples: 4     # min samples required before gating activates
+  obi_rolling_skip_threshold: 0.05  # matches engine's kSweepObiMinAbs
 
 # ---------------------------------------------------------------------------
 # Risk management
@@ -252,6 +261,20 @@ class RulesStrategyConfig:
     # was narrow; wide windows evaluate at close as before.
     narrow_observe_window_threshold_s: float = 60.0
     post_observe_grace_s: float = 10.0
+    # v3.2 §5.7: rolling-window Binance OBI gate. The per-signal
+    # ``require_obi_confirmation`` check reads ``_latest_obi`` (spot value at
+    # fire-time) which is noisy and can flip on a single depth update. This
+    # gate averages OBI over the last N seconds and skips when that smoothed
+    # value opposes the signal direction by more than ``obi_rolling_skip_threshold``.
+    # Complements, does not replace, the spot OBI check.
+    obi_rolling_gate_enabled: bool = True
+    obi_rolling_window_s: float = 20.0  # 10-30s typical (recommendation range)
+    obi_rolling_min_samples: int = 4  # require this many samples before gating
+    # Skip magnitude: an UP fire is aborted when mean_obi <=
+    # -obi_rolling_skip_threshold; DOWN fire when mean_obi >=
+    # +obi_rolling_skip_threshold. 0.05 matches the spot obi_min used by the
+    # engine's confirmation check.
+    obi_rolling_skip_threshold: float = 0.05
 
 
 @dataclass(frozen=True, slots=True)

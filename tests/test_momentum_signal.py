@@ -49,6 +49,7 @@ def _make_signal(
     delta_pct: float = 0.0,
     direction: Direction = Direction.NONE,
     bn_direction_from_open_pct: float = 0.0,
+    binance_obi: float = 0.0,
 ) -> Signal:
     return Signal(
         delta_pct=delta_pct,
@@ -58,7 +59,7 @@ def _make_signal(
         cl_direction_from_open_pct=bn_direction_from_open_pct,
         poly_spread_up=0.0,
         poly_spread_down=0.0,
-        binance_obi=0.0,
+        binance_obi=binance_obi,
         time_remaining=200.0,
     )
 
@@ -1449,3 +1450,201 @@ class TestResetInvariant:
             f"Added: {post_reset_fields - init_fields}, "
             f"Removed: {init_fields - post_reset_fields}"
         )
+
+
+# ---------------------------------------------------------------------------
+# v3.2 §5.7 — rolling-OBI gate
+# ---------------------------------------------------------------------------
+
+
+class TestRollingObiGate:
+    """The rolling-OBI skip gate blocks fires when smoothed Binance OBI
+    opposes the signal direction by >= skip_threshold. Complements (does not
+    replace) the per-signal spot-OBI confirmation.
+    """
+
+    def _prime_kelly(self, strategy: MomentumSignalStrategy) -> None:
+        strategy.kelly_wr_result = AdjustedWinRateResult(
+            adjusted_p=0.88,
+            vol_discount=0,
+            chop_discount=0,
+            outcome_discount=0,
+            total_discount=0,
+            feedback_adjustment=0,
+            regime_ready=True,
+        )
+        strategy.sizing_cfg = SizingConfig()
+        strategy.erosion_cfg = ErosionConfig()
+        strategy.bankroll = 1000.0
+
+    def test_accumulate_populates_and_trims_obi_buffer(self, monkeypatch):
+        """Samples older than obi_rolling_window_s are dropped at record time."""
+        strategy, _ = _make_strategy()
+        base_ts = 10_000.0
+        current = {"t": base_ts}
+
+        def fake_time():
+            return current["t"]
+
+        monkeypatch.setattr("strategy.momentum_signal.time.time", fake_time)
+        # 5 samples, 5 seconds apart
+        for i in range(5):
+            current["t"] = base_ts + i * 5.0
+            strategy._accumulate(0.08, 220.0 - i, 0.1)
+        # cfg default window = 20s; 5 samples span 20s so all still present
+        assert len(strategy._obi_samples) == 5
+        # Jump forward to drop older samples
+        current["t"] = base_ts + 100.0
+        strategy._accumulate(0.08, 180.0, 0.1)
+        # only the fresh sample should remain (all older than window_s=20)
+        assert len(strategy._obi_samples) == 1
+
+    def test_mean_recent_obi_empty_buffer(self):
+        strategy, _ = _make_strategy()
+        mean, n = strategy._mean_recent_obi(20.0)
+        assert mean == 0.0
+        assert n == 0
+
+    def test_mean_recent_obi_computes_average(self, monkeypatch):
+        strategy, _ = _make_strategy()
+        base_ts = 10_000.0
+        current = {"t": base_ts}
+        monkeypatch.setattr("strategy.momentum_signal.time.time", lambda: current["t"])
+        # Three samples: 0.1, 0.2, 0.3 at t=0, 5, 10
+        for i, obi in enumerate((0.1, 0.2, 0.3)):
+            current["t"] = base_ts + i * 5.0
+            strategy._accumulate(0.08, 220.0 - i, obi)
+        current["t"] = base_ts + 11.0
+        mean, n = strategy._mean_recent_obi(20.0)
+        assert n == 3
+        assert mean == pytest.approx(0.2, abs=1e-9)
+
+    @pytest.mark.asyncio
+    async def test_up_fire_skipped_when_rolling_obi_opposes(self, monkeypatch):
+        """UP signal with mean OBI <= -skip_threshold → SKIP."""
+        cfg = make_rules_config(obi_rolling_gate_enabled=True, obi_rolling_min_samples=3)
+        state = make_market_state()
+        sc = make_signal_config(side=Direction.UP, min_delta_pct=0.05, max_variance_pct=1.0)
+        strategy = MomentumSignalStrategy(cfg, state, sc)
+        executor = FakeOrderExecutor()
+        self._prime_kelly(strategy)
+
+        base_ts = 10_000.0
+        current = {"t": base_ts}
+        monkeypatch.setattr("strategy.momentum_signal.time.time", lambda: current["t"])
+
+        # Accumulate OBI-opposing samples (UP signal, OBI negative)
+        for i in range(10):
+            current["t"] = base_ts + i * 1.0
+            sig = _make_signal(bn_direction_from_open_pct=0.001, binance_obi=-0.10)
+            await strategy.evaluate(sig, 220.0 - i * 4, executor)
+        # Fire moment
+        current["t"] = base_ts + 15.0
+        sig = _make_signal(bn_direction_from_open_pct=0.001, binance_obi=-0.10)
+        await strategy.evaluate(sig, 170.0, executor)
+
+        assert strategy._fired
+        assert len(executor.calls) == 0  # gate aborted the fire
+
+    @pytest.mark.asyncio
+    async def test_down_fire_skipped_when_rolling_obi_opposes(self, monkeypatch):
+        """DOWN signal with mean OBI >= +skip_threshold → SKIP."""
+        cfg = make_rules_config(obi_rolling_gate_enabled=True, obi_rolling_min_samples=3)
+        state = make_market_state()
+        sc = make_signal_config(side=Direction.DOWN, min_delta_pct=0.05, max_variance_pct=1.0)
+        strategy = MomentumSignalStrategy(cfg, state, sc)
+        executor = FakeOrderExecutor()
+        self._prime_kelly(strategy)
+
+        base_ts = 10_000.0
+        current = {"t": base_ts}
+        monkeypatch.setattr("strategy.momentum_signal.time.time", lambda: current["t"])
+
+        for i in range(10):
+            current["t"] = base_ts + i * 1.0
+            sig = _make_signal(bn_direction_from_open_pct=-0.001, binance_obi=+0.10)
+            await strategy.evaluate(sig, 220.0 - i * 4, executor)
+        current["t"] = base_ts + 15.0
+        sig = _make_signal(bn_direction_from_open_pct=-0.001, binance_obi=+0.10)
+        await strategy.evaluate(sig, 170.0, executor)
+
+        assert strategy._fired
+        assert len(executor.calls) == 0
+
+    @pytest.mark.asyncio
+    async def test_up_fire_proceeds_when_rolling_obi_agrees(self, monkeypatch):
+        """Aligned OBI does not trigger the gate — fire goes through."""
+        cfg = make_rules_config(obi_rolling_gate_enabled=True, obi_rolling_min_samples=3)
+        state = make_market_state()
+        sc = make_signal_config(side=Direction.UP, min_delta_pct=0.05, max_variance_pct=1.0)
+        strategy = MomentumSignalStrategy(cfg, state, sc)
+        executor = FakeOrderExecutor()
+        self._prime_kelly(strategy)
+
+        base_ts = 10_000.0
+        current = {"t": base_ts}
+        monkeypatch.setattr("strategy.momentum_signal.time.time", lambda: current["t"])
+
+        for i in range(10):
+            current["t"] = base_ts + i * 1.0
+            sig = _make_signal(bn_direction_from_open_pct=0.001, binance_obi=+0.20)
+            await strategy.evaluate(sig, 220.0 - i * 4, executor)
+        current["t"] = base_ts + 15.0
+        sig = _make_signal(bn_direction_from_open_pct=0.001, binance_obi=+0.20)
+        await strategy.evaluate(sig, 170.0, executor)
+
+        assert strategy._fired
+        assert len(executor.calls) == 1  # maker order placed
+
+    @pytest.mark.asyncio
+    async def test_gate_ignored_below_min_samples(self, monkeypatch):
+        """Too few samples in the rolling window → gate does not fire."""
+        cfg = make_rules_config(
+            obi_rolling_gate_enabled=True,
+            obi_rolling_min_samples=50,  # unreachable at our tick count
+        )
+        state = make_market_state()
+        sc = make_signal_config(side=Direction.UP, min_delta_pct=0.05, max_variance_pct=1.0)
+        strategy = MomentumSignalStrategy(cfg, state, sc)
+        executor = FakeOrderExecutor()
+        self._prime_kelly(strategy)
+
+        base_ts = 10_000.0
+        current = {"t": base_ts}
+        monkeypatch.setattr("strategy.momentum_signal.time.time", lambda: current["t"])
+
+        for i in range(10):
+            current["t"] = base_ts + i * 1.0
+            sig = _make_signal(bn_direction_from_open_pct=0.001, binance_obi=-0.10)
+            await strategy.evaluate(sig, 220.0 - i * 4, executor)
+        current["t"] = base_ts + 15.0
+        sig = _make_signal(bn_direction_from_open_pct=0.001, binance_obi=-0.10)
+        await strategy.evaluate(sig, 170.0, executor)
+
+        assert strategy._fired
+        assert len(executor.calls) == 1  # gate skipped; fire proceeded
+
+    @pytest.mark.asyncio
+    async def test_gate_disabled_via_config(self, monkeypatch):
+        """obi_rolling_gate_enabled=False → no rolling-OBI check."""
+        cfg = make_rules_config(obi_rolling_gate_enabled=False)
+        state = make_market_state()
+        sc = make_signal_config(side=Direction.UP, min_delta_pct=0.05, max_variance_pct=1.0)
+        strategy = MomentumSignalStrategy(cfg, state, sc)
+        executor = FakeOrderExecutor()
+        self._prime_kelly(strategy)
+
+        base_ts = 10_000.0
+        current = {"t": base_ts}
+        monkeypatch.setattr("strategy.momentum_signal.time.time", lambda: current["t"])
+
+        for i in range(10):
+            current["t"] = base_ts + i * 1.0
+            sig = _make_signal(bn_direction_from_open_pct=0.001, binance_obi=-0.30)
+            await strategy.evaluate(sig, 220.0 - i * 4, executor)
+        current["t"] = base_ts + 15.0
+        sig = _make_signal(bn_direction_from_open_pct=0.001, binance_obi=-0.30)
+        await strategy.evaluate(sig, 170.0, executor)
+
+        assert strategy._fired
+        assert len(executor.calls) == 1

@@ -18,6 +18,7 @@ from __future__ import annotations
 import logging
 import math
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -134,6 +135,11 @@ class MomentumSignalStrategy:
         self._latest_pct: float = 0.0
         self._latest_obi: float = 0.0
         self._lowest_t: float = signal_cfg.observe_from_s
+        # v3.2 §5.7: rolling OBI buffer — (wall_ts, obi) samples fed from
+        # _accumulate and trimmed to the last obi_rolling_window_s seconds at
+        # fire-time. wall time (not time_remaining) so the rolling window
+        # semantics are stable even if the strategy tick cadence changes.
+        self._obi_samples: deque[tuple[float, float]] = deque()
         # Maker-first entry tracking
         self._maker_order_id: str | None = None
         self._maker_placed_at: float = 0.0
@@ -186,6 +192,7 @@ class MomentumSignalStrategy:
         self._latest_pct = 0.0
         self._latest_obi = 0.0
         self._lowest_t = self.signal_cfg.observe_from_s
+        self._obi_samples.clear()
         # Maker-first entry reset
         self._maker_order_id = None
         self._maker_placed_at = 0.0
@@ -239,6 +246,35 @@ class MomentumSignalStrategy:
             self._lowest_t = time_remaining
             self._latest_pct = bn_dir_pct
             self._latest_obi = obi
+
+        # v3.2 §5.7: rolling-OBI buffer. Always record (even if variance
+        # subsampling skipped this tick) — the rolling gate benefits from
+        # every fresh OBI reading. Trim to the configured window.
+        window_s = self.cfg.obi_rolling_window_s
+        if window_s > 0.0:
+            now = time.time()
+            self._obi_samples.append((now, obi))
+            cutoff = now - window_s
+            while self._obi_samples and self._obi_samples[0][0] < cutoff:
+                self._obi_samples.popleft()
+
+    def _mean_recent_obi(self, window_s: float) -> tuple[float, int]:
+        """Mean Binance OBI over the last ``window_s`` seconds.
+
+        Returns (mean, sample_count). (0.0, 0) when the buffer is empty.
+        """
+        if window_s <= 0.0 or not self._obi_samples:
+            return 0.0, 0
+        cutoff = time.time() - window_s
+        total = 0.0
+        n = 0
+        for ts, val in self._obi_samples:
+            if ts >= cutoff:
+                total += val
+                n += 1
+        if n == 0:
+            return 0.0, 0
+        return total / n, n
 
     def _population_stddev(self) -> float:
         if self._n < 2:
@@ -882,6 +918,31 @@ class MomentumSignalStrategy:
             return
 
         entry_price = best_ask
+
+        # v3.2 §5.7: rolling-OBI gate. The engine's spot-OBI confirmation
+        # (require_obi_confirmation → _latest_obi) flips on a single depth
+        # update; averaging over the last obi_rolling_window_s gives a
+        # flow-direction read that survives individual-tick noise. Skip if
+        # the smoothed OBI opposes signal direction by ≥ skip_threshold.
+        if self.cfg.obi_rolling_gate_enabled and self.cfg.obi_rolling_window_s > 0.0:
+            mean_obi, n_obi = self._mean_recent_obi(self.cfg.obi_rolling_window_s)
+            if n_obi >= self.cfg.obi_rolling_min_samples:
+                thresh = self.cfg.obi_rolling_skip_threshold
+                opposes = (sc.side == Direction.UP and mean_obi <= -thresh) or (
+                    sc.side == Direction.DOWN and mean_obi >= thresh
+                )
+                if opposes:
+                    log.info(
+                        "[SKIP] rank=%d side=%s reason=OBI_ROLLING_OPPOSES "
+                        "mean_obi=%.3f n=%d window=%.1fs thresh=%.3f",
+                        sc.rank,
+                        sc.side.value,
+                        mean_obi,
+                        n_obi,
+                        self.cfg.obi_rolling_window_s,
+                        thresh,
+                    )
+                    return
 
         # Market-agreement filter: skip when live price deviates too far from
         # the signal's historical avg_entry_price (market strongly disagrees)

@@ -517,4 +517,5 @@ class PaperOrderManager:
                 side=rec.rule_direction or rec.direction,
                 size_usd=rec.final_bet_size or 0.0,
                 balance=self._balance,
+                market_outcome=rec.actual_outcome,
             )

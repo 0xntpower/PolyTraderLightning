@@ -524,6 +524,7 @@ class ResolutionManager:
                 side=sc.side.value,
                 size_usd=size_usd,
                 balance=self._bankroll_tracker.bankroll,
+                market_outcome=outcome,
             )
 
         # Journal record

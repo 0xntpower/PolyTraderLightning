@@ -287,8 +287,14 @@ def send_bet_result(
     side: str,
     size_usd: float,
     balance: float | None = None,
+    market_outcome: str | None = None,
 ) -> bool:
-    """Notify bet outcome — WIN, LOSS, SKIP, or FLAT."""
+    """Notify bet outcome — WIN, LOSS, SKIP, or FLAT.
+
+    ``market_outcome`` is the side the window resolved to (e.g. "up"/"down").
+    Shown alongside the bot's bet side so LOSS notifications reveal whether
+    the market went against us or a correct bet was exited early.
+    """
     is_paper = mode == "paper"
     url = _url("DISCORD_WEBHOOK_PAPER_BETS" if is_paper else "DISCORD_WEBHOOK_LIVE_BETS")
     tag = "PAPER" if is_paper else "LIVE"
@@ -302,6 +308,8 @@ def send_bet_result(
         _field("Entry", f"`{entry_price:.2f}`"),
         _field("Size", f"`${size_usd:.2f}`"),
     ]
+    if market_outcome:
+        fields.append(_field("Market", f"`{market_outcome.upper()}`"))
     if balance is not None:
         fields.append(_field("Balance", f"`${balance:.2f}`"))
 

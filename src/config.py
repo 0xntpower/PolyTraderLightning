@@ -184,7 +184,11 @@ erosion:
   # cusum_override_multiplier * cusum_limit, the reversal-pp and top-bid
   # suppressions are bypassed because the breach is too large to attribute
   # to noise. 0 disables the override (always honor suppressions).
-  cusum_override_multiplier: 2.0
+  # v3.2: raised 2.0 -> 3.8. v3.1 trade #10 was a false exit at cusum=2.87
+  # (3.58x limit); v3.1 trades #3 and #4 were correct exits at cusum 7.08
+  # and 4.07 (8.85x and 5.09x). Threshold 3.8 (=3.04 cusum) blocks the
+  # false exit while preserving both true-positive catches.
+  cusum_override_multiplier: 3.8
 """
 
 
@@ -363,7 +367,12 @@ class ErosionConfig:
     # to attribute to noise. v3.0 01:47 loss had cusum=1.608 (2.01x limit)
     # blocked by the reversal gate; an override would have cut ~$16 off the
     # full $25.18 loss. 0 disables the override (always honor suppressions).
-    cusum_override_multiplier: float = 2.0
+    # v3.2: raised 2.0 -> 3.8. v3.1 trade #10 was a false exit at cusum=2.87
+    # (3.58x limit) that turned a correct UP bet into a -$6.31 loss (would
+    # have been +$10.76 if held). v3.1 trades #3 and #4 were correct
+    # override exits at cusum 7.08 and 4.07 (8.85x and 5.09x); threshold
+    # 3.8 (=3.04 cusum) blocks #10 while preserving both true positives.
+    cusum_override_multiplier: float = 3.8
 
 
 @dataclass(frozen=True, slots=True)

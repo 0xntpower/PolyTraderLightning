@@ -283,7 +283,10 @@ class WindowEventHandler:
                 self._chop_detector.n_windows,
             )
 
-        # Record outcome direction for bias tracking
+        # Record outcome direction for bias tracking. v3.2 §5.9: pass
+        # |close_delta_pct| so the magnitude-weighted tracker can down-
+        # weight tiny-move windows that would otherwise dominate the
+        # agreement statistic when summed as equal 1-count samples.
         snap = state.end_snapshot
         if snap and snap.window_ts == last_window_ts:
             outcome_sig = compute_signal_from_snapshot(snap)
@@ -293,7 +296,7 @@ class WindowEventHandler:
             outcome_sig.direction.value if outcome_sig.direction != Direction.NONE else None
         )
         if outcome_dir:
-            self._outcome_tracker.record_outcome(outcome_dir)
+            self._outcome_tracker.record_outcome(outcome_dir, outcome_sig.delta_pct)
             self._outcome_tracker.save_cache(self._paths.outcome_cache)
 
     def _finalize_paper_window(

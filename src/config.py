@@ -204,6 +204,12 @@ regime:
   outcome_lookback_windows: 6    # rolling window of recent outcomes
   outcome_normal_agreement: 0.50 # 50% agreement = no concern
   outcome_high_agreement: 0.15   # 15% agreement = full severity
+  # v3.2 §5.9: magnitude-weighted outcome agreement. Instead of treating
+  # every resolved window equally, weight by |close_delta_pct| so tiny-
+  # move windows don't drag the regime indicator around. Set to false
+  # to fall back to the legacy count-based fraction.
+  outcome_magnitude_weighted: true
+  outcome_min_magnitude_pct: 0.01   # treat deltas below this as floor weight
   cache_staleness_minutes: 30.0  # discard cached regime data older than this (0=off)
   # v3.2 short-horizon EWMA volatility (RiskMetrics λ≈0.94)
   vol_fast_enabled: true             # feed EWMA vol from strategy tick loop
@@ -441,6 +447,15 @@ class RegimeConfig:
     outcome_lookback_windows: int = 6
     outcome_normal_agreement: float = 0.50
     outcome_high_agreement: float = 0.15
+    # v3.2 §5.9: magnitude-weighted outcome agreement. Instead of treating
+    # every resolved window equally, the tracker weights each historical
+    # window by ``|close_delta_pct|`` so tiny-move windows (noise) don't
+    # drag the regime indicator as hard as real sustained moves. Set to
+    # False to fall back to count-based fraction.
+    outcome_magnitude_weighted: bool = True
+    # Floor weight to keep zero-magnitude windows from dropping out of the
+    # average entirely (interpreted as percent, same units as delta_pct).
+    outcome_min_magnitude_pct: float = 0.01
     cache_staleness_minutes: float = 30.0
     # v3.2 short-horizon EWMA volatility (RiskMetrics λ≈0.94). Feeds BTC
     # price once per vol_fast_sample_interval_s from the strategy tick

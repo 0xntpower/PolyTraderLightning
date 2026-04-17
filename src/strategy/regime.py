@@ -64,6 +64,8 @@ class RegimeManager:
         )
         outcome_tracker = OutcomeTracker(
             lookback_windows=cfg.outcome_lookback_windows,
+            magnitude_weighted=cfg.outcome_magnitude_weighted,
+            min_magnitude_pct=cfg.outcome_min_magnitude_pct,
         )
         fast_vol_tracker: EwmaVolatilityTracker | None = None
         if cfg.vol_fast_enabled:

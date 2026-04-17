@@ -241,7 +241,7 @@ class FakeChopDetector:
 
 
 class FakeOutcomeTracker:
-    def record_outcome(self, direction):
+    def record_outcome(self, direction, magnitude_pct=0.0):
         pass
 
     def save_cache(self, path):

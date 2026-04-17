@@ -281,7 +281,11 @@ async def _wait_for_first_signal(
                     # Record outcome direction for the completed warmup window
                     if outcome_tracker is not None and _local_open > 0:
                         _warmup_outcome = "up" if state.btc_chainlink >= _local_open else "down"
-                        outcome_tracker.record_outcome(_warmup_outcome)
+                        # v3.2 §5.9: magnitude from chainlink close vs open.
+                        _warmup_magnitude = (
+                            abs(state.btc_chainlink - _local_open) / _local_open * 100.0
+                        )
+                        outcome_tracker.record_outcome(_warmup_outcome, _warmup_magnitude)
                         outcome_tracker.save_cache(paths.outcome_cache)
                     _credited = min(vol_tracker.n_returns, chop_detector.n_windows) * 5.0
                     _warmup_done = _credited >= cfg.sizing.warmup_minutes

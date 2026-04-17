@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     from risk.position_tracker import PositionTracker
     from shared.chop_detector import ChopDetector
     from shared.decay_detector import DecayDetector
+    from shared.ewma_volatility_tracker import EwmaVolatilityTracker
     from shared.outcome_tracker import OutcomeTracker
     from shared.trade_journal import TradeJournal
     from shared.volatility_tracker import VolatilityTracker
@@ -142,6 +143,7 @@ class WindowEventHandler:
             MomentumSignalStrategy | None,
         ],
         signal_cfg_to_dict_fn: Callable[[MomentumSignalConfig], dict[str, object]],
+        fast_vol_tracker: EwmaVolatilityTracker | None = None,
     ) -> None:
         self._cfg = cfg
         self._state = state
@@ -161,6 +163,7 @@ class WindowEventHandler:
         self._vol_tracker = vol_tracker
         self._chop_detector = chop_detector
         self._outcome_tracker = outcome_tracker
+        self._fast_vol_tracker = fast_vol_tracker
         self._paths = paths
         self._session = session
         self._pending_signal_mgr = pending_signal_mgr
@@ -888,6 +891,107 @@ class WindowEventHandler:
 
         return new_window_ts
 
+    def _effective_vol_stddev(self) -> tuple[float, float]:
+        """Return (effective_stddev_pct, fast_equivalent_pct).
+
+        The effective stddev fed to the severity scoring is the max of the
+        slow 2-hour close-to-close tracker and the short-horizon EWMA
+        tracker scaled up to an equivalent 5-minute horizon. That way a
+        mid-window squeeze lifts the severity immediately instead of
+        waiting for the next window boundary, while a calm slow reading
+        still dominates when the fast tracker is quiet.
+        """
+        import math as _math
+
+        slow = self._vol_tracker.current_stddev_pct
+        fast_equivalent = 0.0
+        if self._fast_vol_tracker is not None and self._fast_vol_tracker.ready:
+            fcfg = self._cfg.regime
+            if fcfg.vol_fast_sample_interval_s > 0.0:
+                scale = _math.sqrt(fcfg.vol_fast_horizon_s / fcfg.vol_fast_sample_interval_s)
+                fast_equivalent = self._fast_vol_tracker.current_stddev_pct * scale
+        return max(slow, fast_equivalent), fast_equivalent
+
+    def _build_kelly_wr_result(
+        self,
+        strategy: MomentumSignalStrategy,
+    ) -> tuple[object, float, float, float]:
+        """Run estimate_adjusted_win_rate against current tracker readings.
+
+        Returns the AdjustedWinRateResult plus the raw vol_stddev, fast
+        equivalent, and chop flips used, so callers can log them.
+        """
+        from strategy.kelly import estimate_adjusted_win_rate
+
+        cfg = self._cfg
+        self._vol_tracker.update_stddev()
+        effective_vol, fast_equivalent = self._effective_vol_stddev()
+        chop_flips = self._chop_detector.avg_flips
+        regime_ready = (
+            self._vol_tracker.n_returns >= cfg.regime.vol_min_samples
+            or self._chop_detector.n_windows >= cfg.regime.chop_min_samples
+            or (self._fast_vol_tracker is not None and self._fast_vol_tracker.ready)
+        )
+        outcome_agreement = self._outcome_tracker.direction_agreement(
+            strategy.signal_cfg.side.value,
+        )
+
+        kelly_outcomes: deque[int] = self._recent_outcomes
+        if self._optimistic_outcomes:
+            from collections import deque as _deque
+
+            kelly_outcomes = _deque(
+                list(self._recent_outcomes) + list(self._optimistic_outcomes),
+                maxlen=self._recent_outcomes.maxlen,
+            )
+
+        wr = estimate_adjusted_win_rate(
+            base_win_rate=strategy.signal_cfg.conservative_p(cfg.sizing.wilson_max_shrink_pct),
+            vol_stddev=effective_vol,
+            chop_avg_flips=chop_flips,
+            outcome_agreement=outcome_agreement,
+            vol_baseline=cfg.regime.vol_normal_pct,
+            vol_elevated=cfg.regime.vol_high_pct,
+            chop_baseline=cfg.regime.chop_normal_flips,
+            chop_elevated=cfg.regime.chop_high_flips,
+            outcome_baseline=cfg.regime.outcome_normal_agreement,
+            outcome_elevated=cfg.regime.outcome_high_agreement,
+            max_discount=cfg.sizing.kelly_regime_cap,
+            vol_weight=cfg.sizing.vol_weight,
+            chop_weight=cfg.sizing.chop_weight,
+            outcome_weight=cfg.sizing.outcome_weight,
+            regime_ready=regime_ready,
+            recent_outcomes=kelly_outcomes,
+            min_outcomes_for_feedback=cfg.sizing.feedback_min_trades,
+        )
+        return wr, effective_vol, fast_equivalent, chop_flips
+
+    def refresh_regime_context(self, strategy: MomentumSignalStrategy) -> None:
+        """Recompute kelly_wr_result from current tracker readings.
+
+        Safe to call at strategy-tick cadence. Only touches fields that
+        depend on intra-window regime drift (kelly_wr_result). Bankroll,
+        sizing_cfg, sprt_factor, warmup_active are set once at window
+        boundary by _compute_kelly_context and never touched here.
+
+        Intended call site: strategy tick loop when
+        ``time_remaining <= cfg.regime.intra_window_refresh_s``. Before
+        v3.2 the Kelly context was frozen at window-open; v3.1 T4 fired on
+        a 2-hour squeeze that materialised mid-window, invisible to the
+        hostile-regime gate — this method closes that gap.
+        """
+        cfg = self._cfg
+        if not cfg.signal_lifecycle.bet_scaling_enabled:
+            return
+        if strategy.sizing_cfg is None:
+            return
+
+        from strategy.kelly import AdjustedWinRateResult
+
+        wr, _, _, _ = self._build_kelly_wr_result(strategy)
+        assert isinstance(wr, AdjustedWinRateResult)  # noqa: S101  # narrow for mypy --strict
+        strategy.kelly_wr_result = wr
+
     def _compute_kelly_context(
         self,
         strategy: MomentumSignalStrategy,
@@ -899,7 +1003,7 @@ class WindowEventHandler:
         ds = decay_detector.state
 
         from shared.risk import age_taper, compute_bet_scale, llr_confidence
-        from strategy.kelly import estimate_adjusted_win_rate
+        from strategy.kelly import AdjustedWinRateResult
 
         # SPRT staleness check
         _stale_threshold_s = cfg.signal_lifecycle.sprt_activation_minutes * 60.0
@@ -921,51 +1025,9 @@ class WindowEventHandler:
             min_total_scale=cfg.signal_lifecycle.min_bet_scale,
         )
 
-        # Regime metrics
-        self._vol_tracker.update_stddev()
-        _vol_stddev = self._vol_tracker.current_stddev_pct
-        _chop_flips = self._chop_detector.avg_flips
-        _regime_ready = (
-            self._vol_tracker.n_returns >= cfg.regime.vol_min_samples
-            or self._chop_detector.n_windows >= cfg.regime.chop_min_samples
-        )
-
-        _outcome_agreement = self._outcome_tracker.direction_agreement(
-            strategy.signal_cfg.side.value,
-        )
-
-        # Merge any live optimistic outcomes into the Kelly feedback view.
-        # In paper mode the optimistic deque is always empty. In live mode
-        # this fast-forwards the feedback loop by 15-20 min (the resolution
-        # defer) so next-window sizing reflects just-resolved snapshot guesses.
-        _kelly_outcomes: deque[int] = self._recent_outcomes
-        if self._optimistic_outcomes:
-            from collections import deque as _deque
-
-            _kelly_outcomes = _deque(
-                list(self._recent_outcomes) + list(self._optimistic_outcomes),
-                maxlen=self._recent_outcomes.maxlen,
-            )
-
-        _kelly_wr_result = estimate_adjusted_win_rate(
-            base_win_rate=strategy.signal_cfg.conservative_p(cfg.sizing.wilson_max_shrink_pct),
-            vol_stddev=_vol_stddev,
-            chop_avg_flips=_chop_flips,
-            outcome_agreement=_outcome_agreement,
-            vol_baseline=cfg.regime.vol_normal_pct,
-            vol_elevated=cfg.regime.vol_high_pct,
-            chop_baseline=cfg.regime.chop_normal_flips,
-            chop_elevated=cfg.regime.chop_high_flips,
-            outcome_baseline=cfg.regime.outcome_normal_agreement,
-            outcome_elevated=cfg.regime.outcome_high_agreement,
-            max_discount=cfg.sizing.kelly_regime_cap,
-            vol_weight=cfg.sizing.vol_weight,
-            chop_weight=cfg.sizing.chop_weight,
-            outcome_weight=cfg.sizing.outcome_weight,
-            regime_ready=_regime_ready,
-            recent_outcomes=_kelly_outcomes,
-            min_outcomes_for_feedback=cfg.sizing.feedback_min_trades,
-        )
+        wr, _vol_stddev, _fast_equivalent, _chop_flips = self._build_kelly_wr_result(strategy)
+        assert isinstance(wr, AdjustedWinRateResult)  # noqa: S101  # narrow for mypy --strict
+        _kelly_wr_result = wr
 
         # Pass Kelly context to strategy
         strategy.sprt_factor = sprt_factor
@@ -1020,12 +1082,15 @@ class WindowEventHandler:
             cfg.signal_lifecycle.age_floor,
         )
 
-        # Regime log
+        # Regime log. vol_stddev is the effective (max of slow + scaled
+        # fast EWMA) value; vol_fast is the horizon-scaled fast equivalent
+        # for visibility into which tracker drove the reading.
         log.info(
-            "REGIME vol_stddev=%.3f%% chop_flips=%.1f "
+            "REGIME vol_stddev=%.3f%% vol_fast=%.3f%% chop_flips=%.1f "
             "outcome=%s "
             "sprt=%s llr=%.2f age=%dw bankroll=$%.2f",
             _vol_stddev,
+            _fast_equivalent,
             _chop_flips,
             self._outcome_tracker.summary(),
             f"active_{llr_conf * 100:.0f}pct" if _signal_is_stale else "dormant",

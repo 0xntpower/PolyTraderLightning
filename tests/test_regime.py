@@ -55,6 +55,7 @@ class FakePaths:
     vol_cache = "vol.json"
     chop_cache = "chop.json"
     outcome_cache = "outcome.json"
+    fast_vol_cache = "fast_vol.json"
 
 
 # ---------------------------------------------------------------------------
@@ -73,13 +74,15 @@ class TestRegimeManagerConstruction:
         assert mgr.chop_detector is chop
         assert mgr.outcome_tracker is out
 
+    @patch("shared.ewma_volatility_tracker.EwmaVolatilityTracker")
     @patch("shared.volatility_tracker.VolatilityTracker")
     @patch("shared.chop_detector.ChopDetector")
     @patch("shared.outcome_tracker.OutcomeTracker")
-    def test_create_builds_and_loads_caches(self, MockOutcome, MockChop, MockVol):
+    def test_create_builds_and_loads_caches(self, MockOutcome, MockChop, MockVol, MockFastVol):
         MockVol.return_value = FakeVolTracker()
         MockChop.return_value = FakeChopDetector()
         MockOutcome.return_value = FakeOutcomeTracker()
+        MockFastVol.return_value = FakeVolTracker()
 
         from fakes import make_regime_config
 
@@ -92,13 +95,17 @@ class TestRegimeManagerConstruction:
         assert mgr.chop_detector._cache_loaded
         assert mgr.outcome_tracker._cache_loaded
 
+    @patch("shared.ewma_volatility_tracker.EwmaVolatilityTracker")
     @patch("shared.volatility_tracker.VolatilityTracker")
     @patch("shared.chop_detector.ChopDetector")
     @patch("shared.outcome_tracker.OutcomeTracker")
-    def test_create_skips_cache_when_staleness_zero(self, MockOutcome, MockChop, MockVol):
+    def test_create_skips_cache_when_staleness_zero(
+        self, MockOutcome, MockChop, MockVol, MockFastVol
+    ):
         MockVol.return_value = FakeVolTracker()
         MockChop.return_value = FakeChopDetector()
         MockOutcome.return_value = FakeOutcomeTracker()
+        MockFastVol.return_value = FakeVolTracker()
 
         from fakes import make_regime_config
 

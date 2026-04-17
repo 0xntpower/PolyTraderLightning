@@ -166,6 +166,13 @@ regime:
   outcome_normal_agreement: 0.50 # 50% agreement = no concern
   outcome_high_agreement: 0.15   # 15% agreement = full severity
   cache_staleness_minutes: 30.0  # discard cached regime data older than this (0=off)
+  # v3.2 short-horizon EWMA volatility (RiskMetrics λ≈0.94)
+  vol_fast_enabled: true             # feed EWMA vol from strategy tick loop
+  vol_fast_sample_interval_s: 10.0   # one kept sample per N seconds
+  vol_fast_decay_lambda: 0.94        # RiskMetrics default (~2min half-life at 10s)
+  vol_fast_min_samples: 6            # min updates before fast vol is valid
+  vol_fast_horizon_s: 300.0          # horizon-scale per-sample stddev to 5-min equivalent
+  intra_window_refresh_s: 240.0      # refresh Kelly context every tick in last N seconds (0=off)
 
 # ---------------------------------------------------------------------------
 # Erosion - post-fire CUSUM exit detection
@@ -339,6 +346,28 @@ class RegimeConfig:
     outcome_normal_agreement: float = 0.50
     outcome_high_agreement: float = 0.15
     cache_staleness_minutes: float = 30.0
+    # v3.2 short-horizon EWMA volatility (RiskMetrics λ≈0.94). Feeds BTC
+    # price once per vol_fast_sample_interval_s from the strategy tick
+    # loop. The horizon-scaled stddev (per-sample → 5-min equivalent) is
+    # max-combined with the slow close-to-close tracker so a mid-window
+    # squeeze reaches the hostile-regime gate on the same tick it appears,
+    # instead of waiting for the next window boundary. v3.1 T4 is the
+    # canonical failure case — see docs/strategy/v3.0_v3.1_signal_analysis.md.
+    vol_fast_enabled: bool = True
+    vol_fast_sample_interval_s: float = 10.0
+    vol_fast_decay_lambda: float = 0.94
+    vol_fast_min_samples: int = 6
+    # Scale the per-sample EWMA stddev up to a 5-min-equivalent horizon so
+    # it is directly comparable to vol_normal_pct / vol_high_pct. Under IID
+    # returns, stddev scales with sqrt(horizon / sample_interval). Default
+    # 300 s / 10 s → factor sqrt(30) ≈ 5.48.
+    vol_fast_horizon_s: float = 300.0
+    # Tick-frequency regime refresh: during the final N seconds of the
+    # window, recompute the Kelly/hostile context every strategy tick so
+    # pre-fire checks see live vol/chop/outcome instead of a value frozen
+    # at window-open. 0 disables. Default 240 s covers the full observe
+    # window across every currently-deployed signal.
+    intra_window_refresh_s: float = 240.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -411,6 +440,7 @@ class Config:
             vol_cache=base / "vol_cache.json",
             chop_cache=base / "chop_cache.json",
             outcome_cache=base / "outcome_cache.json",
+            fast_vol_cache=base / "fast_vol_cache.json",
         )
 
 
@@ -426,6 +456,7 @@ class DataPaths:
     vol_cache: Path = Path("data/paper/vol_cache.json")
     chop_cache: Path = Path("data/paper/chop_cache.json")
     outcome_cache: Path = Path("data/paper/outcome_cache.json")
+    fast_vol_cache: Path = Path("data/paper/fast_vol_cache.json")
 
     def ensure_dirs(self) -> None:
         """Create all necessary directories."""

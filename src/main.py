@@ -73,6 +73,7 @@ if TYPE_CHECKING:
     )
 
     from shared.chop_detector import ChopDetector
+    from shared.ewma_volatility_tracker import EwmaVolatilityTracker
     from shared.outcome_tracker import OutcomeTracker
     from shared.volatility_tracker import VolatilityTracker
 
@@ -226,6 +227,7 @@ async def _wait_for_first_signal(
     chop_detector: ChopDetector | None = None,
     outcome_tracker: OutcomeTracker | None = None,
     paths: DataPaths | None = None,
+    fast_vol_tracker: EwmaVolatilityTracker | None = None,
 ) -> MomentumSignalStrategy:
     """Block until the orchestrator delivers a valid signal via IPC.
 
@@ -316,6 +318,9 @@ async def _wait_for_first_signal(
             if _local_open > 0 and chop_detector is not None:
                 delta = (state.btc_chainlink - _local_open) / _local_open * 100
                 chop_detector.tick("up" if delta >= 0 else "down", delta)
+
+            if fast_vol_tracker is not None and state.btc_chainlink > 0:
+                fast_vol_tracker.record_sample(state.btc_chainlink, time.time())
 
         await asyncio.sleep(STRATEGY_TICK_INTERVAL)
 
@@ -674,6 +679,7 @@ async def _strategy_loop(
     vol_tracker: VolatilityTracker | None = None,
     chop_detector: ChopDetector | None = None,
     outcome_tracker: OutcomeTracker | None = None,
+    fast_vol_tracker: EwmaVolatilityTracker | None = None,
     state_publisher: StatePublisher | None = None,
     fire_mailbox: RecentFireMailbox | None = None,
 ) -> None:
@@ -790,6 +796,7 @@ async def _strategy_loop(
         vol_tracker=vol_tracker,
         chop_detector=chop_detector,
         outcome_tracker=outcome_tracker,
+        fast_vol_tracker=fast_vol_tracker,
         paths=paths,
         session=session,
         pending_signal_mgr=pending_signal_mgr,
@@ -1117,6 +1124,11 @@ async def _strategy_loop(
             # Feed chop detector with every tick
             chop_detector.tick(signal.direction.value, signal.delta_pct)
 
+            # Feed fast (EWMA) vol tracker with BTC price on every tick;
+            # internal throttle keeps samples to one per vol_fast_sample_interval_s.
+            if fast_vol_tracker is not None and state.btc_chainlink > 0:
+                fast_vol_tracker.record_sample(state.btc_chainlink, now)
+
             if time_remaining <= cfg.risk.cancel_unfilled_at_sec:
                 await order_mgr.cancel_all_active()
 
@@ -1148,6 +1160,18 @@ async def _strategy_loop(
                 lifecycle.tick_shadow(signal, time_remaining)
                 await asyncio.sleep(STRATEGY_TICK_INTERVAL)
                 continue
+
+            # v3.2 §5.5 intra-window regime refresh. When the window is
+            # inside the final intra_window_refresh_s seconds, recompute
+            # the Kelly/hostile context against current vol/chop/outcome
+            # readings so a squeeze that materialised after window-open
+            # reaches the hostile gate before the fire decision. v3.1 T4
+            # failure mode — see docs/strategy/v3.0_v3.1_signal_analysis.md.
+            if (
+                cfg.regime.intra_window_refresh_s > 0.0
+                and time_remaining <= cfg.regime.intra_window_refresh_s
+            ):
+                window_handler.refresh_regime_context(rules_strategy)
 
             assert isinstance(order_mgr, OrderExecutor)  # noqa: S101  # invariant: both OrderManager and PaperOrderManager implement OrderExecutor
             await rules_strategy.evaluate(signal, time_remaining, order_mgr)
@@ -1289,11 +1313,12 @@ async def run(signal_path_override: str | None = None, standalone: bool = False)
 
         window_tracker = WindowTracker(cfg, state, session, latency=latency)
 
-        # Create regime trackers (vol/chop/outcome) with cache loading
+        # Create regime trackers (vol/chop/outcome/fast-vol) with cache loading
         regime = RegimeManager.create(cfg.regime, paths)
         vol_tracker = regime.vol_tracker
         chop_detector = regime.chop_detector
         outcome_tracker = regime.outcome_tracker
+        fast_vol_tracker = regime.fast_vol_tracker
 
         # Start price feeds (Binance + Chainlink) before signal wait so
         # pre-signal vol/chop collection has live market data.  CLOB feeds
@@ -1323,6 +1348,7 @@ async def run(signal_path_override: str | None = None, standalone: bool = False)
                 chop_detector,
                 outcome_tracker,
                 paths,
+                fast_vol_tracker=fast_vol_tracker,
             )
 
         # Now that we have a signal (with token IDs), start CLOB feeds
@@ -1379,6 +1405,7 @@ async def run(signal_path_override: str | None = None, standalone: bool = False)
                 vol_tracker=vol_tracker,
                 chop_detector=chop_detector,
                 outcome_tracker=outcome_tracker,
+                fast_vol_tracker=fast_vol_tracker,
                 state_publisher=state_publisher,
                 fire_mailbox=fire_mailbox,
             ),

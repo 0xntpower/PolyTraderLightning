@@ -1151,6 +1151,58 @@ class TestHostileRegimeSkip:
 
 
 # ---------------------------------------------------------------------------
+# v3.2 — v3.1 T4 regression pin
+# ---------------------------------------------------------------------------
+
+
+class TestV31T4Regression:
+    """Pins the exact regime readings from v3.1 trade T4 (the $22 loss that
+    motivated adding outcome_discount to the halve metric). With vol=0.161
+    and chop=0.133 both below the 0.15 halve threshold, the pre-v3.2 max()
+    over (vol, chop) alone would not halve. outcome_sev=0.381 is the signal
+    the gate missed — after v3.2 it trips halving, and the bet is halved.
+
+    If this test ever fails, someone regressed the outcome-in-halve fix
+    (commit 9654495) — re-read docs/strategy/v3.0_v3.1_signal_analysis.md
+    before relaxing it."""
+
+    @pytest.mark.asyncio
+    async def test_t4_inputs_halve_but_do_not_skip(self):
+        # v3.1 T4 readings — see docs/strategy/v3.0_v3.1_signal_analysis.md
+        t4_vol_disc = 0.161
+        t4_chop_disc = 0.133
+        t4_outcome_disc = 0.381
+
+        hostile_strat, hostile_exec = TestHostileRegimeCap._build(
+            vol_discount=t4_vol_disc,
+            chop_discount=t4_chop_disc,
+            outcome_discount=t4_outcome_disc,
+            hostile_threshold=0.15,
+            hostile_skip_threshold=0.25,
+        )
+        await _run_fire(hostile_strat, hostile_exec)
+
+        benign_strat, benign_exec = TestHostileRegimeCap._build(
+            vol_discount=0.05,
+            chop_discount=0.05,
+            outcome_discount=0.05,
+            hostile_threshold=0.15,
+            hostile_skip_threshold=0.25,
+        )
+        await _run_fire(benign_strat, benign_exec)
+
+        # Must halve (outcome_disc > halve_threshold trips via max-combine).
+        assert len(hostile_exec.calls) == 1, "T4 must still fire, not skip"
+        assert hostile_exec.calls[0].size_usd == pytest.approx(
+            benign_exec.calls[0].size_usd * 0.5, rel=0.02
+        ), "T4 must be halved: outcome_discount belongs in the halve metric"
+
+        # Must NOT skip — vol+chop alone stay under skip_threshold.
+        max_vc = max(t4_vol_disc, t4_chop_disc)
+        assert max_vc < 0.25, "T4 vol/chop are below skip threshold by construction"
+
+
+# ---------------------------------------------------------------------------
 # v3.1 — CUSUM overwhelming-breach override
 # ---------------------------------------------------------------------------
 

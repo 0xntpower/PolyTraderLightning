@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from config import DataPaths, RegimeConfig
     from shared.chop_detector import ChopDetector
+    from shared.ewma_volatility_tracker import EwmaVolatilityTracker
     from shared.outcome_tracker import OutcomeTracker
     from shared.volatility_tracker import VolatilityTracker
 
@@ -34,15 +35,18 @@ class RegimeManager:
         vol_tracker: VolatilityTracker,
         chop_detector: ChopDetector,
         outcome_tracker: OutcomeTracker,
+        fast_vol_tracker: EwmaVolatilityTracker | None = None,
     ) -> None:
         self.vol_tracker = vol_tracker
         self.chop_detector = chop_detector
         self.outcome_tracker = outcome_tracker
+        self.fast_vol_tracker = fast_vol_tracker
 
     @classmethod
     def create(cls, cfg: RegimeConfig, paths: DataPaths) -> RegimeManager:
         """Create all trackers and load caches in one call."""
         from shared.chop_detector import ChopDetector
+        from shared.ewma_volatility_tracker import EwmaVolatilityTracker
         from shared.outcome_tracker import OutcomeTracker
         from shared.volatility_tracker import VolatilityTracker
 
@@ -61,14 +65,23 @@ class RegimeManager:
         outcome_tracker = OutcomeTracker(
             lookback_windows=cfg.outcome_lookback_windows,
         )
+        fast_vol_tracker: EwmaVolatilityTracker | None = None
+        if cfg.vol_fast_enabled:
+            fast_vol_tracker = EwmaVolatilityTracker(
+                sample_interval_s=cfg.vol_fast_sample_interval_s,
+                decay_lambda=cfg.vol_fast_decay_lambda,
+                min_samples=cfg.vol_fast_min_samples,
+            )
 
         staleness_sec = cfg.cache_staleness_minutes * 60
         if staleness_sec > 0:
             vol_tracker.load_cache(paths.vol_cache, staleness_sec)
             chop_detector.load_cache(paths.chop_cache, staleness_sec)
             outcome_tracker.load_cache(paths.outcome_cache, staleness_sec)
+            if fast_vol_tracker is not None:
+                fast_vol_tracker.load_cache(paths.fast_vol_cache, staleness_sec)
 
-        return cls(vol_tracker, chop_detector, outcome_tracker)
+        return cls(vol_tracker, chop_detector, outcome_tracker, fast_vol_tracker)
 
     def compute_warmup_credit(self, warmup_minutes: float) -> float:
         """Compute warmup credit from pre-existing tracker data.
@@ -100,3 +113,5 @@ class RegimeManager:
         self.vol_tracker.save_cache(paths.vol_cache)
         self.chop_detector.save_cache(paths.chop_cache)
         self.outcome_tracker.save_cache(paths.outcome_cache)
+        if self.fast_vol_tracker is not None:
+            self.fast_vol_tracker.save_cache(paths.fast_vol_cache)

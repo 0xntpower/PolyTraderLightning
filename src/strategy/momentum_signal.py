@@ -1023,6 +1023,26 @@ class MomentumSignalStrategy:
                 )
                 return
 
+            # v3.2 §5.6 Polymarket-implied probability cross-check. best_ask is the
+            # market's price for YES — i.e. the implied probability the side resolves.
+            # Kelly's has_edge only requires adjusted_p > entry_price; this tightens
+            # to a minimum edge in probability points, skipping fires where the market
+            # has already priced in most of our signal. Set kelly_min_edge_pp=0 to disable.
+            if self.sizing_cfg.kelly_min_edge_pp > 0.0:
+                edge_pp = (self.kelly_wr_result.adjusted_p - entry_price) * 100.0
+                if edge_pp < self.sizing_cfg.kelly_min_edge_pp:
+                    log.info(
+                        "[SKIP] rank=%d side=%s reason=IMPLIED_PROB_TOO_CLOSE "
+                        "p_adj=%.3f entry=%.3f edge=%.2fpp min=%.2fpp",
+                        sc.rank,
+                        sc.side.value,
+                        self.kelly_wr_result.adjusted_p,
+                        entry_price,
+                        edge_pp,
+                        self.sizing_cfg.kelly_min_edge_pp,
+                    )
+                    return
+
             # v3.0 P6 / v3.1 / v3.2 hostile-regime stack. The regime cap already
             # reduces adjusted_p (and therefore raw Kelly); on top of that:
             #   - skip-metric > skip_threshold: abort the fire entirely

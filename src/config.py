@@ -175,6 +175,11 @@ sizing:
   kelly_regime_cap_2_axes: 0.20
   kelly_regime_cap_3_axes: 0.30
   kelly_hot_axis_threshold: 0.33
+  # v3.2 §5.6: Polymarket-implied probability cross-check. Require
+  # adjusted_p - ask >= kelly_min_edge_pp/100 before firing, so the signal
+  # has meaningful edge above what the market has already priced in. 0
+  # disables (Kelly's no-edge check remains as the floor).
+  kelly_min_edge_pp: 2.0
 
 # ---------------------------------------------------------------------------
 # Regime detection - volatility, chop, and outcome bias
@@ -396,6 +401,14 @@ class SizingConfig:
     kelly_regime_cap_2_axes: float = 0.20
     kelly_regime_cap_3_axes: float = 0.30
     kelly_hot_axis_threshold: float = 0.33  # severity*weight counted as "hot"
+    # v3.2 §5.6: Polymarket-implied probability cross-check. ``best_ask`` is
+    # the market's price for YES — i.e. the implied probability we resolve
+    # that side. Kelly's existing no-edge check (raw_kelly > 0) requires
+    # only ``adjusted_p > ask``; this tightens to ``adjusted_p - ask >=
+    # kelly_min_edge_pp / 100``, skipping fires where the market has
+    # already priced in most of our signal (thin margin → expected value
+    # barely covers fees/slippage). Set to 0 to disable.
+    kelly_min_edge_pp: float = 2.0
 
 
 @dataclass(frozen=True, slots=True)

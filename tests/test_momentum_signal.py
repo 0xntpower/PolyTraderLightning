@@ -1753,3 +1753,90 @@ class TestDirectionalRegimeGate:
         await self._run_to_fire(strategy, executor)
         assert strategy._fired
         assert len(executor.calls) == 1
+
+
+class TestMinEdgeGate:
+    """v3.2 §5.6: Polymarket-implied probability cross-check.
+
+    Fire is skipped when ``adjusted_p - best_ask < kelly_min_edge_pp / 100``
+    even though Kelly's raw edge check passes.
+    """
+
+    def _prime_kelly(self, strategy: MomentumSignalStrategy, sizing_cfg: SizingConfig) -> None:
+        strategy.kelly_wr_result = AdjustedWinRateResult(
+            adjusted_p=0.88,
+            vol_discount=0,
+            chop_discount=0,
+            outcome_discount=0,
+            total_discount=0,
+            feedback_adjustment=0,
+            regime_ready=True,
+        )
+        strategy.sizing_cfg = sizing_cfg
+        strategy.erosion_cfg = ErosionConfig()
+        strategy.bankroll = 1000.0
+
+    async def _run_to_fire(
+        self, strategy: MomentumSignalStrategy, executor: FakeOrderExecutor
+    ) -> None:
+        for i in range(10):
+            sig = _make_signal(bn_direction_from_open_pct=0.001)
+            await strategy.evaluate(sig, 220.0 - i * 4, executor)
+        sig = _make_signal(bn_direction_from_open_pct=0.001)
+        await strategy.evaluate(sig, 170.0, executor)
+
+    @pytest.mark.asyncio
+    async def test_skipped_when_edge_below_min(self):
+        """adjusted_p=0.88, best_ask=0.87 → edge=1.0pp < 2.0pp → skip."""
+        strategy, executor = _make_strategy(
+            side=Direction.UP,
+            min_delta_pct=0.05,
+            max_variance_pct=1.0,
+            best_ask_up=0.87,
+        )
+        self._prime_kelly(strategy, SizingConfig())  # kelly_min_edge_pp=2.0 default
+        await self._run_to_fire(strategy, executor)
+        assert strategy._fired
+        assert len(executor.calls) == 0
+
+    @pytest.mark.asyncio
+    async def test_fires_when_edge_meets_min(self):
+        """adjusted_p=0.88, best_ask=0.85 → edge=3.0pp ≥ 2.0pp → fire."""
+        strategy, executor = _make_strategy(
+            side=Direction.UP,
+            min_delta_pct=0.05,
+            max_variance_pct=1.0,
+            best_ask_up=0.85,
+        )
+        self._prime_kelly(strategy, SizingConfig())
+        await self._run_to_fire(strategy, executor)
+        assert strategy._fired
+        assert len(executor.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_fires_at_exact_threshold(self):
+        """edge exactly equal to min → fire (>= comparison)."""
+        strategy, executor = _make_strategy(
+            side=Direction.UP,
+            min_delta_pct=0.05,
+            max_variance_pct=1.0,
+            best_ask_up=0.86,  # edge = (0.88 - 0.86) * 100 = 2.0pp
+        )
+        self._prime_kelly(strategy, SizingConfig())
+        await self._run_to_fire(strategy, executor)
+        assert strategy._fired
+        assert len(executor.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_gate_disabled_when_zero(self):
+        """kelly_min_edge_pp=0 disables the gate; tight edge still fires."""
+        strategy, executor = _make_strategy(
+            side=Direction.UP,
+            min_delta_pct=0.05,
+            max_variance_pct=1.0,
+            best_ask_up=0.879,  # edge = 0.1pp, far below 2pp default
+        )
+        self._prime_kelly(strategy, replace(SizingConfig(), kelly_min_edge_pp=0.0))
+        await self._run_to_fire(strategy, executor)
+        assert strategy._fired
+        assert len(executor.calls) == 1

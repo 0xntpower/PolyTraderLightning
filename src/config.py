@@ -67,6 +67,13 @@ rules_strategy:
   obi_rolling_window_s: 20.0     # 10-30s recommendation range
   obi_rolling_min_samples: 4     # min samples required before gating activates
   obi_rolling_skip_threshold: 0.05  # matches engine's kSweepObiMinAbs
+  # v3.2 §5.2: directional-regime gate. Skips the fire when the t-stat of
+  # the last N 5-min signed returns shows BTC significantly drifting against
+  # the signal side. Catches the "trending against us" regime that the
+  # direction-agnostic vol/chop axes miss.
+  directional_gate_enabled: true
+  directional_threshold_t: 2.0
+  directional_min_samples: 6
 
 # ---------------------------------------------------------------------------
 # Risk management
@@ -275,6 +282,16 @@ class RulesStrategyConfig:
     # +obi_rolling_skip_threshold. 0.05 matches the spot obi_min used by the
     # engine's confirmation check.
     obi_rolling_skip_threshold: float = 0.05
+    # v3.2 §5.2: directional-regime fire gate. Computes the t-statistic of
+    # recent 5-min signed BTC returns from the volatility tracker. Large
+    # positive t = up-trending regime; large negative t = down-trending. A
+    # fire is vetoed when |t| exceeds ``directional_threshold_t`` AND the
+    # trend direction opposes the signal side — hostile-regime variant that
+    # captures "BTC has been drifting against this signal for hours".
+    # Complements vol/chop/outcome (which are direction-agnostic).
+    directional_gate_enabled: bool = True
+    directional_threshold_t: float = 2.0  # |t| above which trend is "significant"
+    directional_min_samples: int = 6  # min completed returns before gate activates
 
 
 @dataclass(frozen=True, slots=True)

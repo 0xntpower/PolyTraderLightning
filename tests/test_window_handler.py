@@ -218,6 +218,9 @@ class FakeVolTracker:
     def update_stddev(self):
         pass
 
+    def signed_return_t_stat(self, min_samples=4):
+        return 0.0
+
 
 @dataclass
 class FakeChopStats:

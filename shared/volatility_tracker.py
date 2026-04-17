@@ -76,6 +76,27 @@ class VolatilityTracker:
             self._last_stddev = self._stddev(returns)
         return self._last_stddev
 
+    def signed_return_t_stat(self, min_samples: int = 4) -> float:
+        """t-statistic of the rolling signed returns (v3.2 §5.2).
+
+        Returns mean(returns) / (stddev(returns) / sqrt(n)) — the standard
+        one-sample t-stat for "is the mean significantly different from zero?".
+        Positive = up-trending regime, negative = down-trending.  Zero when
+        fewer than ``min_samples`` returns are available or stddev collapses.
+
+        Callers compare the absolute value to a threshold (e.g. 2.0) to decide
+        whether the recent BTC drift is strong enough to oppose a signal.
+        """
+        returns = self._compute_returns()
+        if len(returns) < max(2, min_samples):
+            return 0.0
+        n = len(returns)
+        mean = sum(returns) / n
+        stddev = self._stddev(returns)
+        if stddev <= 0.0:
+            return 0.0
+        return mean / (stddev / math.sqrt(n))
+
     def _compute_returns(self) -> list[float]:
         """Compute percent returns from consecutive close prices."""
         prices = list(self._prices)

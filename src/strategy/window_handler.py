@@ -1036,6 +1036,12 @@ class WindowEventHandler:
         # Pass Kelly context to strategy
         strategy.sprt_factor = sprt_factor
         strategy.kelly_wr_result = _kelly_wr_result
+        # v3.2 §5.2: directional regime t-stat — t-stat of rolling signed
+        # returns; the fire-time gate in momentum_signal vetoes when the
+        # drift opposes the signal side with magnitude >= threshold.
+        strategy.directional_t = self._vol_tracker.signed_return_t_stat(
+            min_samples=cfg.rules_strategy.directional_min_samples,
+        )
 
         # v3.0: paper/live startup drift check moved to main.py, before the
         # strategy loop starts, so it runs before any fire decisions.
@@ -1091,12 +1097,13 @@ class WindowEventHandler:
         # for visibility into which tracker drove the reading.
         log.info(
             "REGIME vol_stddev=%.3f%% vol_fast=%.3f%% chop_flips=%.1f "
-            "outcome=%s "
+            "outcome=%s dir_t=%+.2f "
             "sprt=%s llr=%.2f age=%dw bankroll=$%.2f",
             _vol_stddev,
             _fast_equivalent,
             _chop_flips,
             self._outcome_tracker.summary(),
+            strategy.directional_t,
             f"active_{llr_conf * 100:.0f}pct" if _signal_is_stale else "dormant",
             ds.llr,
             self._lifecycle.signal_age_windows,

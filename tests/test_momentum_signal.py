@@ -1648,3 +1648,108 @@ class TestRollingObiGate:
 
         assert strategy._fired
         assert len(executor.calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# v3.2 §5.2 — directional-regime gate
+# ---------------------------------------------------------------------------
+
+
+class TestDirectionalRegimeGate:
+    """strategy.directional_t carries the rolling BTC t-stat from vol_tracker.
+    The fire-time gate vetoes when |t| >= threshold AND the sign opposes the
+    signal side (UP / DOWN).
+    """
+
+    def _prime_kelly(self, strategy: MomentumSignalStrategy) -> None:
+        strategy.kelly_wr_result = AdjustedWinRateResult(
+            adjusted_p=0.88,
+            vol_discount=0,
+            chop_discount=0,
+            outcome_discount=0,
+            total_discount=0,
+            feedback_adjustment=0,
+            regime_ready=True,
+        )
+        strategy.sizing_cfg = SizingConfig()
+        strategy.erosion_cfg = ErosionConfig()
+        strategy.bankroll = 1000.0
+
+    async def _run_to_fire(self, strategy, executor):
+        for i in range(10):
+            sig = _make_signal(bn_direction_from_open_pct=0.001)
+            await strategy.evaluate(sig, 220.0 - i * 4, executor)
+        sig = _make_signal(bn_direction_from_open_pct=0.001)
+        await strategy.evaluate(sig, 170.0, executor)
+
+    @pytest.mark.asyncio
+    async def test_up_fire_skipped_when_trend_is_strongly_down(self):
+        cfg = make_rules_config(directional_gate_enabled=True, directional_threshold_t=2.0)
+        state = make_market_state()
+        sc = make_signal_config(side=Direction.UP, min_delta_pct=0.05, max_variance_pct=1.0)
+        strategy = MomentumSignalStrategy(cfg, state, sc)
+        executor = FakeOrderExecutor()
+        self._prime_kelly(strategy)
+        strategy.directional_t = -3.5  # strong down-trend opposes UP signal
+        await self._run_to_fire(strategy, executor)
+        assert strategy._fired
+        assert len(executor.calls) == 0
+
+    @pytest.mark.asyncio
+    async def test_down_fire_skipped_when_trend_is_strongly_up(self):
+        cfg = make_rules_config(directional_gate_enabled=True, directional_threshold_t=2.0)
+        state = make_market_state()
+        sc = make_signal_config(side=Direction.DOWN, min_delta_pct=0.05, max_variance_pct=1.0)
+        strategy = MomentumSignalStrategy(cfg, state, sc)
+        executor = FakeOrderExecutor()
+        self._prime_kelly(strategy)
+        strategy.directional_t = 3.5  # strong up-trend opposes DOWN signal
+        # DOWN signal needs negative bn_direction_from_open_pct to satisfy conditions
+        for i in range(10):
+            sig = _make_signal(bn_direction_from_open_pct=-0.001)
+            await strategy.evaluate(sig, 220.0 - i * 4, executor)
+        sig = _make_signal(bn_direction_from_open_pct=-0.001)
+        await strategy.evaluate(sig, 170.0, executor)
+        assert strategy._fired
+        assert len(executor.calls) == 0
+
+    @pytest.mark.asyncio
+    async def test_up_fire_proceeds_when_trend_aligns(self):
+        """Positive t + UP signal = trend aligned → no veto."""
+        cfg = make_rules_config(directional_gate_enabled=True, directional_threshold_t=2.0)
+        state = make_market_state()
+        sc = make_signal_config(side=Direction.UP, min_delta_pct=0.05, max_variance_pct=1.0)
+        strategy = MomentumSignalStrategy(cfg, state, sc)
+        executor = FakeOrderExecutor()
+        self._prime_kelly(strategy)
+        strategy.directional_t = 3.5  # strong up-trend aligned with UP signal
+        await self._run_to_fire(strategy, executor)
+        assert strategy._fired
+        assert len(executor.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_fire_proceeds_when_t_below_threshold(self):
+        """|t| below threshold → gate dormant even if direction opposes."""
+        cfg = make_rules_config(directional_gate_enabled=True, directional_threshold_t=2.0)
+        state = make_market_state()
+        sc = make_signal_config(side=Direction.UP, min_delta_pct=0.05, max_variance_pct=1.0)
+        strategy = MomentumSignalStrategy(cfg, state, sc)
+        executor = FakeOrderExecutor()
+        self._prime_kelly(strategy)
+        strategy.directional_t = -1.5  # opposes UP but magnitude < threshold
+        await self._run_to_fire(strategy, executor)
+        assert strategy._fired
+        assert len(executor.calls) == 1
+
+    @pytest.mark.asyncio
+    async def test_gate_disabled_via_config(self):
+        cfg = make_rules_config(directional_gate_enabled=False)
+        state = make_market_state()
+        sc = make_signal_config(side=Direction.UP, min_delta_pct=0.05, max_variance_pct=1.0)
+        strategy = MomentumSignalStrategy(cfg, state, sc)
+        executor = FakeOrderExecutor()
+        self._prime_kelly(strategy)
+        strategy.directional_t = -10.0  # extreme, but gate is disabled
+        await self._run_to_fire(strategy, executor)
+        assert strategy._fired
+        assert len(executor.calls) == 1

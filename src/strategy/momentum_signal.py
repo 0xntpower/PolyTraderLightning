@@ -121,6 +121,10 @@ class MomentumSignalStrategy:
         self.last_kelly_result: KellyResult | None = None
         # Warmup mode — set by main loop each window
         self.warmup_active: bool = False
+        # v3.2 §5.2: directional regime t-stat from vol_tracker, set by
+        # WindowEventHandler._compute_kelly_context each window. 0 when
+        # tracker has insufficient data.
+        self.directional_t: float = 0.0
         # Welford online variance (accumulates values in percent units)
         self._n: int = 0
         self._mean: float = 0.0
@@ -918,6 +922,28 @@ class MomentumSignalStrategy:
             return
 
         entry_price = best_ask
+
+        # v3.2 §5.2: directional-regime gate. t-stat of the rolling signed
+        # 5-min returns from the volatility tracker. Positive = up-trending
+        # regime, negative = down-trending. Skip when magnitude exceeds
+        # threshold AND the trend opposes the signal side — catches the
+        # hostile "BTC drifting against this signal for hours" regime the
+        # direction-agnostic vol/chop axes cannot see.
+        if self.cfg.directional_gate_enabled and self.cfg.directional_threshold_t > 0.0:
+            t = self.directional_t
+            thresh = self.cfg.directional_threshold_t
+            opposes = (sc.side == Direction.UP and t <= -thresh) or (
+                sc.side == Direction.DOWN and t >= thresh
+            )
+            if opposes:
+                log.info(
+                    "[SKIP] rank=%d side=%s reason=DIRECTIONAL_OPPOSES t_stat=%.2f thresh=%.2f",
+                    sc.rank,
+                    sc.side.value,
+                    t,
+                    thresh,
+                )
+                return
 
         # v3.2 §5.7: rolling-OBI gate. The engine's spot-OBI confirmation
         # (require_obi_confirmation → _latest_obi) flips on a single depth

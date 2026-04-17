@@ -227,42 +227,55 @@ def estimate_adjusted_win_rate(
     regime_ready: bool,
     recent_outcomes: deque[int],
     min_outcomes_for_feedback: int,
+    soft_or_combine: bool = False,
+    max_discount_2_axes: float | None = None,
+    max_discount_3_axes: float | None = None,
+    hot_axis_threshold: float = 0.33,
 ) -> AdjustedWinRateResult:
     """Convert regime metrics into an adjusted win probability.
 
-    Uses a max-weighted severity formula — the worst single factor
-    drives the discount.  Moderate readings across multiple factors
-    do not compound into false alarms:
+    Combines per-axis severities into a single discount. Two modes:
 
-        total_discount = max_discount * max(severity_i * weight_i)
+      max-combine (legacy):
+          total_discount = max_discount * max(severity_i * weight_i)
+      soft-OR (v3.2 §5.3):
+          combined_sev = 1 - ∏(1 - severity_i * weight_i)
+          cap          = max_discount        if 0 or 1 axis is "hot"
+                         max_discount_2_axes if 2 axes are hot
+                         max_discount_3_axes if 3 axes are hot
+          total_discount = cap * combined_sev
+
+    "Hot" = severity*weight ≥ ``hot_axis_threshold``. Per-axis contribs
+    (``vol_discount`` / ``chop_discount`` / ``outcome_discount``) always
+    carry the raw severity*weight — only ``total_discount`` differs.
 
     Parameters
     ----------
     base_win_rate : float
         Signal's OOS win rate (e.g. 0.873).
-    vol_stddev : float
-        Current volatility stddev from regime tracker.
-    chop_avg_flips : float
-        Current chop avg flips from regime tracker.
-    outcome_agreement : float
-        Fraction of recent windows resolving in the signal's direction (0-1).
-    vol_baseline / vol_elevated : float
-        Calm / elevated volatility thresholds.
-    chop_baseline / chop_elevated : float
-        Calm / elevated chop thresholds.
+    vol_stddev / chop_avg_flips / outcome_agreement : float
+        Current regime readings.
+    vol_baseline / vol_elevated, chop_baseline / chop_elevated,
     outcome_baseline / outcome_elevated : float
-        Agreement thresholds (inverted: baseline is high, elevated is low).
+        Severity interpolation endpoints.
     max_discount : float
-        Maximum win rate reduction (e.g. 0.25).
+        Single-hot-axis discount ceiling (e.g. 0.12).
     vol_weight / chop_weight / outcome_weight : float
-        Per-factor weight (0-1) controlling how much of the budget each factor
-        can consume independently.
+        Per-axis weights controlling contribution strength.
     regime_ready : bool
         Whether regime has enough data.
     recent_outcomes : deque
         Last N resolved trade outcomes (1=win, 0=loss) for feedback.
     min_outcomes_for_feedback : int
         Minimum trades before using feedback.
+    soft_or_combine : bool
+        If True, combine via 1 - ∏(1 - sev_i·w_i) and scale the cap by hot-axis
+        count. Defaults to False for backward compatibility.
+    max_discount_2_axes / max_discount_3_axes : float | None
+        Caps used when 2 or 3 axes are hot. ``None`` falls back to
+        ``max_discount`` so soft-OR does not implicitly widen the ceiling.
+    hot_axis_threshold : float
+        severity*weight value above which an axis is counted as "hot".
     """
     if not regime_ready:
         return AdjustedWinRateResult(base_win_rate, 0.0, 0.0, 0.0, 0.0, 0.0, False)
@@ -276,12 +289,36 @@ def estimate_adjusted_win_rate(
         outcome_elevated,
     )
 
-    # Step 2: Max-weighted combination — worst factor drives the discount,
-    # moderate factors don't compound into false alarms.
+    # Step 2: Per-axis weighted contributions. These always feed the
+    # hostile/SKIP gates (which compare max contrib vs their thresholds)
+    # regardless of combine mode.
     vol_contrib = vol_severity * vol_weight
     chop_contrib = chop_severity * chop_weight
     outcome_contrib = outcome_severity * outcome_weight
-    total_discount = max_discount * max(vol_contrib, chop_contrib, outcome_contrib)
+
+    if soft_or_combine:
+        # Soft-OR: moderate readings across multiple axes compound.
+        # Clamp per-axis contribs to [0, 1] before the product so a weight > 1
+        # cannot flip a factor negative.
+        v_c = max(0.0, min(1.0, vol_contrib))
+        c_c = max(0.0, min(1.0, chop_contrib))
+        o_c = max(0.0, min(1.0, outcome_contrib))
+        combined_sev = 1.0 - (1.0 - v_c) * (1.0 - c_c) * (1.0 - o_c)
+
+        # Adaptive cap: widen the ceiling when 2+ axes are simultaneously hot.
+        hot_count = sum(
+            1 for c in (vol_contrib, chop_contrib, outcome_contrib) if c >= hot_axis_threshold
+        )
+        if hot_count >= 3 and max_discount_3_axes is not None:
+            cap = max_discount_3_axes
+        elif hot_count >= 2 and max_discount_2_axes is not None:
+            cap = max_discount_2_axes
+        else:
+            cap = max_discount
+        total_discount = cap * combined_sev
+    else:
+        # Legacy max-weighted combination — worst factor drives the discount.
+        total_discount = max_discount * max(vol_contrib, chop_contrib, outcome_contrib)
 
     # Step 4: Performance feedback (optional, requires enough data)
     feedback_adjustment = 0.0

@@ -245,12 +245,11 @@ class TestEstimateAdjustedWinRate:
         assert result.outcome_discount > 0
         assert result.adjusted_p < 0.90
 
-    def test_max_weighted_not_additive(self):
-        """With both vol and chop elevated, discount should be max(contrib), not sum."""
-        both = self._call(vol_stddev=0.30, chop_avg_flips=10.0)
-        vol_only = self._call(vol_stddev=0.30)
-        chop_only = self._call(chop_avg_flips=10.0)
-        # Max-weighted: total should be the larger of the two, not sum
+    def test_max_weighted_not_additive_legacy(self):
+        """Legacy max-combine: with both vol and chop elevated, discount = max(contrib)."""
+        both = self._call(vol_stddev=0.30, chop_avg_flips=10.0, soft_or_combine=False)
+        vol_only = self._call(vol_stddev=0.30, soft_or_combine=False)
+        chop_only = self._call(chop_avg_flips=10.0, soft_or_combine=False)
         assert both.total_discount == pytest.approx(
             max(vol_only.total_discount, chop_only.total_discount),
         )
@@ -294,6 +293,133 @@ class TestEstimateAdjustedWinRate:
         assert 0.0 <= result.vol_severity <= 1.0
         assert 0.0 <= result.chop_severity <= 1.0
         assert 0.0 <= result.outcome_severity <= 1.0
+
+
+class TestSoftOrCombineAndAdaptiveCap:
+    """v3.2 §5.3 + §5.10: soft-OR combine + hot-axis cap scaling."""
+
+    def _call(self, **overrides) -> AdjustedWinRateResult:
+        defaults = {
+            "base_win_rate": 0.90,
+            "vol_stddev": 0.10,
+            "chop_avg_flips": 3.0,
+            "outcome_agreement": 0.50,
+            "vol_baseline": 0.10,
+            "vol_elevated": 0.30,
+            "chop_baseline": 3.0,
+            "chop_elevated": 10.0,
+            "outcome_baseline": 0.50,
+            "outcome_elevated": 0.15,
+            "max_discount": 0.12,
+            "vol_weight": 1.0,
+            "chop_weight": 1.0,
+            "outcome_weight": 0.8,
+            "regime_ready": True,
+            "recent_outcomes": deque(maxlen=KELLY_OUTCOME_WINDOW_SIZE),
+            "min_outcomes_for_feedback": 10,
+            "soft_or_combine": True,
+            "max_discount_2_axes": 0.20,
+            "max_discount_3_axes": 0.30,
+            "hot_axis_threshold": 0.33,
+        }
+        defaults.update(overrides)
+        return estimate_adjusted_win_rate(**defaults)
+
+    def test_soft_or_beats_max_on_v31_t4_inputs(self):
+        """v3.1 T4 (vol=0.161, chop=0.133, outcome=0.381 @ 0.8 weight) — soft-OR
+        compounds all three moderate readings; max-combine only sees the worst."""
+        # Reverse-engineer the inputs that produce those severities.
+        # vol=0.161 → vol_stddev = 0.10 + 0.161*(0.30-0.10) = 0.1322
+        # chop=0.133 → chop_flips = 3.0 + 0.133*(10.0-3.0) = 3.931
+        # outcome_sev=0.381/0.8 = 0.476 → agreement = 0.50 - 0.476*(0.50-0.15) = 0.3334
+        vol_stddev = 0.1322
+        chop_flips = 3.931
+        agreement = 0.3334
+
+        soft = self._call(
+            vol_stddev=vol_stddev,
+            chop_avg_flips=chop_flips,
+            outcome_agreement=agreement,
+            soft_or_combine=True,
+        )
+        legacy = self._call(
+            vol_stddev=vol_stddev,
+            chop_avg_flips=chop_flips,
+            outcome_agreement=agreement,
+            soft_or_combine=False,
+        )
+
+        # Per-axis contribs identical — only the combine step differs.
+        assert soft.vol_discount == pytest.approx(legacy.vol_discount)
+        assert soft.chop_discount == pytest.approx(legacy.chop_discount)
+        assert soft.outcome_discount == pytest.approx(legacy.outcome_discount)
+
+        # Soft-OR total_discount must exceed legacy max for this case.
+        assert soft.total_discount > legacy.total_discount
+
+    def test_soft_or_single_hot_axis_uses_base_cap(self):
+        """Only outcome severity clears hot_axis_threshold → cap = max_discount."""
+        # outcome_sev = 0.5, others near zero
+        result = self._call(
+            vol_stddev=0.10,
+            chop_avg_flips=3.0,
+            outcome_agreement=0.325,  # sev ≈ 0.5
+        )
+        # hot count = 1 (outcome_contrib = 0.5*0.8 = 0.4, above 0.33)
+        # combined = 1 - (1-0)(1-0)(1-0.4) = 0.4
+        # cap = 0.12; discount = 0.12 * 0.4 = 0.048
+        assert result.total_discount == pytest.approx(0.048, abs=1e-3)
+
+    def test_soft_or_two_hot_axes_uses_2_axes_cap(self):
+        """Two axes above threshold → cap widens to max_discount_2_axes."""
+        # vol_sev = 0.5 (stddev 0.20), chop_sev = 0.5 (flips 6.5)
+        result = self._call(
+            vol_stddev=0.20,
+            chop_avg_flips=6.5,
+            outcome_agreement=0.50,  # calm
+            max_discount_2_axes=0.20,
+        )
+        # combined = 1 - (1-0.5)(1-0.5)(1-0) = 0.75
+        # cap = 0.20; discount = 0.20 * 0.75 = 0.15
+        assert result.total_discount == pytest.approx(0.15, abs=1e-3)
+
+    def test_soft_or_three_hot_axes_uses_3_axes_cap(self):
+        """All three axes above threshold → cap widens to max_discount_3_axes."""
+        # vol_sev = 0.5, chop_sev = 0.5, outcome_sev = 0.5 (agreement 0.325) * 0.8 = 0.4
+        result = self._call(
+            vol_stddev=0.20,
+            chop_avg_flips=6.5,
+            outcome_agreement=0.325,
+            max_discount_3_axes=0.30,
+        )
+        # combined = 1 - 0.5 * 0.5 * 0.6 = 0.85
+        # cap = 0.30; discount = 0.30 * 0.85 = 0.255
+        assert result.total_discount == pytest.approx(0.255, abs=1e-3)
+
+    def test_soft_or_falls_back_to_base_cap_when_higher_caps_missing(self):
+        """With 2 hot axes but no max_discount_2_axes supplied, keep max_discount."""
+        result = self._call(
+            vol_stddev=0.20,
+            chop_avg_flips=6.5,
+            outcome_agreement=0.50,
+            max_discount_2_axes=None,
+            max_discount_3_axes=None,
+        )
+        # cap = 0.12 (no widening), combined = 0.75 → discount = 0.09
+        assert result.total_discount == pytest.approx(0.09, abs=1e-3)
+
+    def test_hot_axis_threshold_controls_cap_tier(self):
+        """Raising hot_axis_threshold demotes borderline axes out of the hot count."""
+        # Two borderline axes at severity 0.3 (below threshold 0.33) — no widening.
+        result = self._call(
+            vol_stddev=0.16,  # sev ≈ 0.30
+            chop_avg_flips=5.1,  # sev ≈ 0.30
+            outcome_agreement=0.50,
+            hot_axis_threshold=0.33,
+        )
+        # hot count = 0 → cap = 0.12
+        # combined = 1 - (1-0.30)(1-0.30) = 1 - 0.49 = 0.51
+        assert result.total_discount == pytest.approx(0.12 * 0.51, abs=1e-3)
 
 
 # ---------------------------------------------------------------------------

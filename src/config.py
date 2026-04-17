@@ -149,6 +149,16 @@ sizing:
   # skip threshold and skipping on it alone killed v3.1 T5/T7/T9 wins in
   # the counterfactual. Leaves a halving band intact. 0 disables.
   hostile_regime_skip_threshold: 0.25
+  # v3.2 §5.3: soft-OR combine of per-axis severities instead of max(...)
+  # — compounds moderate readings across vol/chop/outcome into a larger
+  # total_discount (v3.1 T4 failure mode). Per-axis contribs unchanged.
+  kelly_soft_or_combine: true
+  # v3.2 §5.10: adaptive discount cap. 1 hot axis → kelly_regime_cap (0.12);
+  # 2 hot axes → kelly_regime_cap_2_axes (0.20); 3 hot axes →
+  # kelly_regime_cap_3_axes (0.30). Hot = severity*weight ≥ threshold.
+  kelly_regime_cap_2_axes: 0.20
+  kelly_regime_cap_3_axes: 0.30
+  kelly_hot_axis_threshold: 0.33
 
 # ---------------------------------------------------------------------------
 # Regime detection - volatility, chop, and outcome bias
@@ -330,6 +340,22 @@ class SizingConfig:
     # (v3.1 T5/T7/T9 all had outcome_sev=0.381). Must exceed
     # hostile_regime_threshold to leave a halving band intact. 0 disables.
     hostile_regime_skip_threshold: float = 0.25
+    # v3.2 §5.3: soft-OR combine replaces max(vol, chop, outcome). When
+    # multiple axes are moderately elevated together (v3.1 T4: vol=0.161,
+    # chop=0.133, outcome=0.381 all individually below the 0.15 hostile
+    # gate), max-combine reports only the worst single axis; soft-OR
+    # compounds them into a meaningfully larger total_discount. Per-axis
+    # contribs (feeding hostile/SKIP gates) are unchanged — only the final
+    # total_discount differs.
+    kelly_soft_or_combine: bool = True
+    # v3.2 §5.10: adaptive max_discount cap. kelly_regime_cap (0.12) stays
+    # the default for a single hot axis; when 2 or 3 axes clear
+    # kelly_hot_axis_threshold the cap widens so the compounded soft-OR
+    # severity can actually bite into adjusted_p. Without this scaling, the
+    # 0.12 ceiling neutralises most of the soft-OR benefit.
+    kelly_regime_cap_2_axes: float = 0.20
+    kelly_regime_cap_3_axes: float = 0.30
+    kelly_hot_axis_threshold: float = 0.33  # severity*weight counted as "hot"
 
 
 @dataclass(frozen=True, slots=True)

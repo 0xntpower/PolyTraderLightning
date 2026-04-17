@@ -963,6 +963,10 @@ class WindowEventHandler:
             regime_ready=regime_ready,
             recent_outcomes=kelly_outcomes,
             min_outcomes_for_feedback=cfg.sizing.feedback_min_trades,
+            soft_or_combine=cfg.sizing.kelly_soft_or_combine,
+            max_discount_2_axes=cfg.sizing.kelly_regime_cap_2_axes,
+            max_discount_3_axes=cfg.sizing.kelly_regime_cap_3_axes,
+            hot_axis_threshold=cfg.sizing.kelly_hot_axis_threshold,
         )
         return wr, effective_vol, fast_equivalent, chop_flips
 

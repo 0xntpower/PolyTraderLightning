@@ -53,12 +53,31 @@ def calculate_smart_score(signal: dict[str, Any]) -> float:
     confidence = min(raw_confidence / confidence_norm_cap, 1.0)
 
     # Recency-weighted fold strength: each test fold gets linearly
-    # increasing weight (oldest=1, newest=N).  Fold indices start at
-    # kMinTrain (=2), so position = index - 2.
+    # increasing weight (oldest=1, newest=N), plus a v3.3 recency boost
+    # on the two newest folds. With 6 test folds the weights are
+    # [1,2,3,4,6,8] instead of [1,2,3,4,5,6]. Must stay in sync with
+    # kFoldRecencyBoost* constants in CrossFoldAggregationStage.cpp.
     first_test_fold = 2  # must match core::kWalkForwardMinTrainFolds
+    boost_newest = 2.0
+    boost_second_newest = 1.0
+    # newest test-fold index = first_test_fold + (total_folds - 1)
+    newest_fold_idx = first_test_fold + total_folds - 1
     max_fold_weight_sum = total_folds * (total_folds + 1) / 2.0
+    if total_folds >= 1:
+        max_fold_weight_sum += boost_newest
+    if total_folds >= 2:
+        max_fold_weight_sum += boost_second_newest
     fold_indices = signal.get("wfFoldIndices", [])
-    fold_weight_sum = sum((idx - first_test_fold) + 1.0 for idx in fold_indices)
+
+    def _fold_weight(idx: int) -> float:
+        base = (idx - first_test_fold) + 1.0
+        if idx == newest_fold_idx:
+            return base + boost_newest
+        if idx + 1 == newest_fold_idx:
+            return base + boost_second_newest
+        return base
+
+    fold_weight_sum = sum(_fold_weight(idx) for idx in fold_indices)
     fold_strength = fold_weight_sum / max_fold_weight_sum if max_fold_weight_sum > 0 else 0.0
 
     # Matches C++ CrossFoldAggregationStage: statStrength is minFoldWR *

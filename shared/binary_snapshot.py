@@ -13,12 +13,12 @@ from typing import Final, NamedTuple
 # === GENERATED FILE — DO NOT EDIT ===
 # Regenerate via shared/codegen/gen_binary_snapshot.py.
 # Source schema: shared/binary_snapshot_schema.toml
-# Schema SHA256 (first 16 hex): 5b3d1a94cae90ed5
+# Schema SHA256 (first 16 hex): b5d16d4d75f74099
 
-SCHEMA_VERSION: Final[int] = 3
-STRUCT_FORMAT: Final[str] = "<BBBBBBBBBBBBQQdddddddddiddddddddddiiddddddiidddddddddddddddddiiidi"
+SCHEMA_VERSION: Final[int] = 4
+STRUCT_FORMAT: Final[str] = "<BBBBBBBBBBBBQQdddddddddddiddddddddddiiddddddiidddddddddddddddddiiidi"
 STRUCT: Final[struct.Struct] = struct.Struct(STRUCT_FORMAT)
-SIZE: Final[int] = 408
+SIZE: Final[int] = 424
 if STRUCT.size != SIZE:  # pragma: no cover
     raise RuntimeError("binary_snapshot: struct.Struct size mismatch — regenerate")
 
@@ -39,7 +39,9 @@ FIELD_NAMES: Final[tuple[str, ...]] = (
     "ts_ms",
     "btc_binance",
     "btc_chainlink",
-    "binance_obi",
+    "binance_obi_d5",
+    "binance_obi_d10",
+    "binance_obi_d20",
     "window_open_price",
     "time_remaining",
     "best_bid_up",
@@ -115,7 +117,9 @@ class HotSnapshot(NamedTuple):
     ts_ms: int
     btc_binance: float
     btc_chainlink: float
-    binance_obi: float
+    binance_obi_d5: float
+    binance_obi_d10: float
+    binance_obi_d20: float
     window_open_price: float
     time_remaining: float
     best_bid_up: float

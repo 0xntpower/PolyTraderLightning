@@ -16,6 +16,18 @@ class Direction(Enum):
     NONE = "none"
 
 
+class ObiDepth(Enum):
+    """Centered-OBI depth level. Mirrors engine ``core::ObiDepth``.
+
+    ``NONE`` means the per-signal OBI gate is disabled (threshold == 0.0).
+    ``D10`` / ``D20`` select which centered OBI the gate reads.
+    """
+
+    NONE = "none"
+    D10 = "D10"
+    D20 = "D20"
+
+
 @dataclass(frozen=True, slots=True)
 class Signal:
     # Core direction signal
@@ -25,7 +37,10 @@ class Signal:
 
     # Extended backtest features (all computed when open prices are available)
     time_remaining: float = 0.0
-    binance_obi: float = 0.0
+    # Centered Binance OBI at three depths (see MarketState.binance_obi_d*).
+    binance_obi_d5: float = 0.0
+    binance_obi_d10: float = 0.0
+    binance_obi_d20: float = 0.0
     delta_bn_cl_pct: float = 0.0  # (binance - chainlink) / chainlink
     poly_implied_up_prob: float = 0.0  # (best_bid_up + best_ask_up) / 2
     bn_direction_from_open_pct: float = 0.0  # (binance_now - binance_open) / binance_open
@@ -33,11 +48,21 @@ class Signal:
     poly_spread_up: float = 0.0  # best_ask_up - best_bid_up
     poly_spread_down: float = 0.0  # best_ask_down - best_bid_down
 
+    def obi_at(self, depth: ObiDepth) -> float:
+        """Centered OBI at the requested depth. ``NONE`` returns 0.0."""
+        if depth is ObiDepth.D10:
+            return self.binance_obi_d10
+        if depth is ObiDepth.D20:
+            return self.binance_obi_d20
+        return 0.0
+
     def as_feature_dict(self) -> dict[str, float]:
         """Return all backtest features as a dict for logging/recording."""
         return {
             "time_remaining": round(self.time_remaining, 2),
-            "binance_obi": round(self.binance_obi, 4),
+            "binance_obi_d5": round(self.binance_obi_d5, 4),
+            "binance_obi_d10": round(self.binance_obi_d10, 4),
+            "binance_obi_d20": round(self.binance_obi_d20, 4),
             "delta_bn_cl_pct": round(self.delta_bn_cl_pct, 6),
             "poly_implied_up_prob": round(self.poly_implied_up_prob, 4),
             "bn_direction_from_open_pct": round(self.bn_direction_from_open_pct, 6),
@@ -55,7 +80,9 @@ def compute_signal(state: MarketState) -> Signal:
             direction=Direction.NONE,
             feeds_agree=False,
             time_remaining=state.time_remaining,
-            binance_obi=state.binance_obi,
+            binance_obi_d5=state.binance_obi_d5,
+            binance_obi_d10=state.binance_obi_d10,
+            binance_obi_d20=state.binance_obi_d20,
         )
 
     return _compute(
@@ -67,7 +94,9 @@ def compute_signal(state: MarketState) -> Signal:
         best_ask_up=state.best_ask_up,
         best_bid_down=state.best_bid_down,
         best_ask_down=state.best_ask_down,
-        binance_obi=state.binance_obi,
+        binance_obi_d5=state.binance_obi_d5,
+        binance_obi_d10=state.binance_obi_d10,
+        binance_obi_d20=state.binance_obi_d20,
         time_remaining=state.time_remaining,
     )
 
@@ -76,7 +105,12 @@ def compute_signal_from_snapshot(snap: WindowSnapshot) -> Signal:
     """Compute full signal from a frozen end-of-window snapshot."""
     if snap.open_price <= 0 or snap.chainlink_price <= 0:
         return Signal(
-            delta_pct=0.0, direction=Direction.NONE, feeds_agree=False, binance_obi=snap.binance_obi
+            delta_pct=0.0,
+            direction=Direction.NONE,
+            feeds_agree=False,
+            binance_obi_d5=snap.binance_obi_d5,
+            binance_obi_d10=snap.binance_obi_d10,
+            binance_obi_d20=snap.binance_obi_d20,
         )
 
     return _compute(
@@ -88,7 +122,9 @@ def compute_signal_from_snapshot(snap: WindowSnapshot) -> Signal:
         best_ask_up=snap.best_ask_up,
         best_bid_down=snap.best_bid_down,
         best_ask_down=snap.best_ask_down,
-        binance_obi=snap.binance_obi,
+        binance_obi_d5=snap.binance_obi_d5,
+        binance_obi_d10=snap.binance_obi_d10,
+        binance_obi_d20=snap.binance_obi_d20,
         time_remaining=0.0,
     )
 
@@ -102,7 +138,9 @@ def _compute(
     best_ask_up: float,
     best_bid_down: float,
     best_ask_down: float,
-    binance_obi: float,
+    binance_obi_d5: float,
+    binance_obi_d10: float,
+    binance_obi_d20: float,
     time_remaining: float,
 ) -> Signal:
     delta_pct = (chainlink - chainlink_open) / chainlink_open * 100.0
@@ -148,7 +186,9 @@ def _compute(
         direction=direction,
         feeds_agree=feeds_agree,
         time_remaining=time_remaining,
-        binance_obi=binance_obi,
+        binance_obi_d5=binance_obi_d5,
+        binance_obi_d10=binance_obi_d10,
+        binance_obi_d20=binance_obi_d20,
         delta_bn_cl_pct=delta_bn_cl_pct,
         poly_implied_up_prob=poly_implied_up_prob,
         bn_direction_from_open_pct=bn_direction_from_open_pct,

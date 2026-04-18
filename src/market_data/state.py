@@ -50,7 +50,10 @@ class WindowSnapshot:
     best_ask_up: float = 0.0
     best_bid_down: float = 0.0
     best_ask_down: float = 0.0
-    binance_obi: float = 0.0
+    # Centered OBI at three depths, computed from btcusdt@depth20@100ms.
+    binance_obi_d5: float = 0.0
+    binance_obi_d10: float = 0.0
+    binance_obi_d20: float = 0.0
 
 
 @dataclass
@@ -60,8 +63,13 @@ class MarketState:
     btc_chainlink: float = 0.0
     btc_chainlink_ts: float = 0.0
 
-    # Binance order book imbalance: (bid_qty - ask_qty) / (bid_qty + ask_qty)
-    binance_obi: float = 0.0
+    # Centered Binance order book imbalance: (bid - ask) / (bid + ask),
+    # computed at three depths from btcusdt@depth20@100ms. D5 is collected
+    # for research parity with the data collector; engine signals gate on
+    # D10 or D20 (see MomentumSignalConfig.obi_depth).
+    binance_obi_d5: float = 0.0
+    binance_obi_d10: float = 0.0
+    binance_obi_d20: float = 0.0
     binance_obi_ts: float = 0.0
 
     window_open_price: float = 0.0  # Chainlink open price for current window
@@ -176,7 +184,9 @@ class MarketState:
             best_ask_up=self.best_ask_up,
             best_bid_down=self.best_bid_down,
             best_ask_down=self.best_ask_down,
-            binance_obi=self.binance_obi,
+            binance_obi_d5=self.binance_obi_d5,
+            binance_obi_d10=self.binance_obi_d10,
+            binance_obi_d20=self.binance_obi_d20,
         )
         self.end_snapshot = snap
         return snap

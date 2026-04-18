@@ -138,6 +138,8 @@ def _signal_cfg_to_dict(sc: MomentumSignalConfig) -> dict[str, Any]:
         "observeToS": sc.observe_to_s,
         "minDeltaPct": sc.min_delta_pct,
         "maxVariancePct": sc.max_variance_pct,
+        "obiThreshold": sc.obi_threshold,
+        "obiDepth": sc.obi_depth.value,
         "trainWinRatePct": sc.train_win_rate_pct,
         "oosWinRatePct": sc.oos_win_rate_pct,
         "oosBhAdjustedPValue": sc.bh_adjusted_p_value,
@@ -179,9 +181,10 @@ def _build_strategy(
         log.warning("signal warning [%s]: %s", w.field, w.message)
 
     sc = result.signal
+    obi_gate = f"{sc.obi_threshold:.2f}@{sc.obi_depth.value}" if sc.obi_threshold > 0.0 else "off"
     log.info(
         "momentum signal accepted: rank=%d side=%s "
-        "observe=[%.0f->%.0f]s min_delta=%.2f%% max_var=%.3f%% "
+        "observe=[%.0f->%.0f]s min_delta=%.2f%% max_var=%.3f%% obi_gate=%s "
         "oos_wr=%.1f%% (%d matches) conservative_p=%.1f%% bh_p=%.3g "
         "avg_entry=%.2f ev=%.4f",
         sc.rank,
@@ -190,6 +193,7 @@ def _build_strategy(
         sc.observe_to_s,
         sc.min_delta_pct,
         sc.max_variance_pct,
+        obi_gate,
         sc.oos_win_rate_pct,
         sc.oos_matches,
         sc.conservative_p(cfg.sizing.wilson_max_shrink_pct) * 100,
@@ -644,20 +648,24 @@ async def _wait_for_prices(state: MarketState, timeout: float = 30.0) -> bool:  
 
         if has_prices and has_obi:
             log.info(
-                "all feeds live: binance=%.2f chainlink=%.2f obi=%.4f",
+                "all feeds live: binance=%.2f chainlink=%.2f obi(d5/d10/d20)=%.4f/%.4f/%.4f",
                 state.btc_binance,
                 state.btc_chainlink,
-                state.binance_obi,
+                state.binance_obi_d5,
+                state.binance_obi_d10,
+                state.binance_obi_d20,
             )
             return True
 
         await asyncio.sleep(0.5)
 
     log.error(
-        "timed out waiting for feeds — binance=%.2f chainlink=%.2f obi=%.4f",
+        "timed out waiting for feeds — binance=%.2f chainlink=%.2f obi(d5/d10/d20)=%.4f/%.4f/%.4f",
         state.btc_binance,
         state.btc_chainlink,
-        state.binance_obi,
+        state.binance_obi_d5,
+        state.binance_obi_d10,
+        state.binance_obi_d20,
     )
     return False
 
@@ -913,7 +921,7 @@ async def _strategy_loop(
                 signal = compute_signal(state)
                 log.info(
                     "STATUS t=%.0fs delta=%.4f%% dir=%s agree=%s "
-                    "chain=%.2f bin=%.2f open=%.2f obi=%.4f "
+                    "chain=%.2f bin=%.2f open=%.2f obi(d10/d20)=%.4f/%.4f "
                     "ask_up=%.2f ask_dn=%.2f bid_up=%.2f bid_dn=%.2f halted=%s",
                     time_remaining,
                     signal.delta_pct,
@@ -922,7 +930,8 @@ async def _strategy_loop(
                     state.btc_chainlink,
                     state.btc_binance,
                     state.window_open_price,
-                    state.binance_obi,
+                    state.binance_obi_d10,
+                    state.binance_obi_d20,
                     state.best_ask_up,
                     state.best_ask_down,
                     state.best_bid_up,
@@ -1089,7 +1098,9 @@ async def _strategy_loop(
                 _hot_snap = StatePublisher.build_hot_snapshot(
                     btc_binance=state.btc_binance,
                     btc_chainlink=state.btc_chainlink,
-                    binance_obi=state.binance_obi,
+                    binance_obi_d5=state.binance_obi_d5,
+                    binance_obi_d10=state.binance_obi_d10,
+                    binance_obi_d20=state.binance_obi_d20,
                     window_open_price=state.window_open_price,
                     window_ts=state.window_ts,
                     time_remaining=time_remaining,

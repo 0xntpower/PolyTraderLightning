@@ -109,9 +109,18 @@ class OrderManager:
         self._early_exit_residual_shares: float = 0.0
         self._early_exit_residual_entry: float = 0.0
 
-    def set_rule_triggered(self, rule_id: int, direction: str, signal: Signal | None) -> None:
+    def set_rule_triggered(
+        self,
+        rule_id: int,
+        direction: str,
+        signal: Signal | None,
+        obi_threshold: float = 0.0,
+        obi_depth: str = "none",
+    ) -> None:
         self._kelly_telemetry["rule_triggered"] = rule_id
         self._kelly_telemetry["rule_direction"] = direction
+        self._kelly_telemetry["rule_obi_threshold"] = obi_threshold
+        self._kelly_telemetry["rule_obi_depth"] = obi_depth
         if signal is not None:
             self._kelly_telemetry["rule_signal_features"] = signal.as_feature_dict()
 

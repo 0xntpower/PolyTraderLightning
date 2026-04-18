@@ -11,7 +11,7 @@
 # ``bool`` is encoded as u8 (0 / 1). All fields are packed without padding
 # (``<`` in Python ``struct``, ``#pragma pack(push, 1)`` in C++).
 
-schema_version = 3
+schema_version = 4
 endianness = "little"
 
 # ---- Header -----------------------------------------------------------
@@ -36,7 +36,9 @@ fields = [
     # ---- Market ------------------------------------------------------
     { name = "btc_binance",         type = "f64", group = "market" },
     { name = "btc_chainlink",       type = "f64", group = "market" },
-    { name = "binance_obi",         type = "f64", group = "market" },
+    { name = "binance_obi_d5",      type = "f64", group = "market",        doc = "Centered OBI over top-5 depth levels" },
+    { name = "binance_obi_d10",     type = "f64", group = "market",        doc = "Centered OBI over top-10 depth levels" },
+    { name = "binance_obi_d20",     type = "f64", group = "market",        doc = "Centered OBI over top-20 depth levels — default for display" },
     { name = "window_open_price",   type = "f64", group = "market" },
     { name = "time_remaining",      type = "f64", group = "market" },
     { name = "best_bid_up",         type = "f64", group = "market" },

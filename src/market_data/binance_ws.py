@@ -1,4 +1,4 @@
-"""WS1: Binance combined stream — btcusdt@trade (price) + btcusdt@depth5@100ms (OBI)."""
+"""WS1: Binance combined stream — btcusdt@trade (price) + btcusdt@depth20@100ms (OBI)."""
 
 from __future__ import annotations
 
@@ -34,13 +34,21 @@ class _BinanceCombinedMsg(TypedDict, total=False):
     data: _BinanceTradeMsg | _BinanceDepthMsg
 
 
-def _compute_obi(bids: Sequence[Sequence[str]], asks: Sequence[Sequence[str]]) -> float:
-    """Order Book Imbalance: (bid_qty - ask_qty) / (bid_qty + ask_qty)."""
+def _centered_obi(
+    bids: Sequence[Sequence[str]],
+    asks: Sequence[Sequence[str]],
+    depth: int,
+) -> float:
+    """Centered OBI over the top ``depth`` levels: (bid - ask) / (bid + ask).
+
+    Returns 0.0 on malformed/empty input. The value is in [-1, +1]; positive
+    means bid-heavy (buy pressure), negative means ask-heavy.
+    """
     try:
-        bid_qty = sum(float(b[1]) for b in bids)
-        ask_qty = sum(float(a[1]) for a in asks)
+        bid_qty = sum(float(b[1]) for b in bids[:depth])
+        ask_qty = sum(float(a[1]) for a in asks[:depth])
         total = bid_qty + ask_qty
-        return (bid_qty - ask_qty) / total if total > 0 else 0.0
+        return (bid_qty - ask_qty) / total if total > 0.0 else 0.0
     except (IndexError, ValueError, TypeError):
         return 0.0
 
@@ -93,7 +101,9 @@ def _handle_depth(data: _BinanceDepthMsg, state: MarketState) -> None:
     try:
         bids = data.get("bids", [])
         asks = data.get("asks", [])
-        state.binance_obi = _compute_obi(bids, asks)
+        state.binance_obi_d5 = _centered_obi(bids, asks, 5)
+        state.binance_obi_d10 = _centered_obi(bids, asks, 10)
+        state.binance_obi_d20 = _centered_obi(bids, asks, 20)
         state.binance_obi_ts = time.time()
     except (KeyError, ValueError, TypeError, IndexError):
         pass  # best-effort OBI update, malformed depth tick is non-critical

@@ -97,7 +97,7 @@ risk:
 # Data connections
 # ---------------------------------------------------------------------------
 connections:
-  binance_ws: "wss://stream.binance.com:9443/stream?streams=btcusdt@trade/btcusdt@depth5@100ms"
+  binance_ws: "wss://stream.binance.com:9443/stream?streams=btcusdt@trade/btcusdt@depth20@100ms"
   rtds_ws: "wss://ws-live-data.polymarket.com"
   clob_market_ws: "wss://ws-subscriptions-clob.polymarket.com/ws/market"
   clob_user_ws: "wss://ws-subscriptions-clob.polymarket.com/ws/user"
@@ -334,7 +334,7 @@ class RiskConfig:
 @dataclass(frozen=True, slots=True)
 class ConnectionsConfig:
     binance_ws: str = (
-        "wss://stream.binance.com:9443/stream?streams=btcusdt@trade/btcusdt@depth5@100ms"
+        "wss://stream.binance.com:9443/stream?streams=btcusdt@trade/btcusdt@depth20@100ms"
     )
     rtds_ws: str = "wss://ws-live-data.polymarket.com"
     clob_market_ws: str = "wss://ws-subscriptions-clob.polymarket.com/ws/market"

@@ -249,6 +249,9 @@ def send_bet_placed(
     rank: int,
     order_id: str = "",
     entry_type: str = "taker",
+    obi_threshold: float | None = None,
+    obi_depth: str | None = None,
+    obi_observed: float | None = None,
 ) -> bool:
     """Notify that a bet was submitted."""
     is_paper = mode == "paper"
@@ -265,6 +268,15 @@ def send_bet_placed(
     ]
     if order_id:
         fields.append(_field("Order", f"`{order_id[:16]}`"))
+    if obi_threshold is not None:
+        if obi_threshold > 0.0 and obi_depth:
+            gate = f"{obi_threshold:.2f}@{obi_depth}"
+            if obi_observed is not None:
+                fields.append(_field("OBI Gate", f"`{gate}` (obs `{obi_observed:+.3f}`)"))
+            else:
+                fields.append(_field("OBI Gate", f"`{gate}`"))
+        elif obi_observed is not None:
+            fields.append(_field("OBI Gate", f"`off` (obs `{obi_observed:+.3f}`)"))
 
     return _send(
         url,
@@ -288,6 +300,8 @@ def send_bet_result(
     size_usd: float,
     balance: float | None = None,
     market_outcome: str | None = None,
+    obi_threshold: float | None = None,
+    obi_depth: str | None = None,
 ) -> bool:
     """Notify bet outcome — WIN, LOSS, SKIP, or FLAT.
 
@@ -310,6 +324,11 @@ def send_bet_result(
     ]
     if market_outcome:
         fields.append(_field("Market", f"`{market_outcome.upper()}`"))
+    if obi_threshold is not None:
+        if obi_threshold > 0.0 and obi_depth:
+            fields.append(_field("OBI Gate", f"`{obi_threshold:.2f}@{obi_depth}`"))
+        else:
+            fields.append(_field("OBI Gate", "`off`"))
     if balance is not None:
         fields.append(_field("Balance", f"`${balance:.2f}`"))
 
@@ -447,6 +466,8 @@ def send_signal_updated(
     folds_appeared: int | None = None,
     total_folds: int | None = None,
     _fold_indices: list[int] | None = None,
+    obi_threshold: float | None = None,
+    obi_depth: str | None = None,
 ) -> bool:
     """Notify that the bot switched to a new active signal."""
     url = _url("DISCORD_WEBHOOK_SIGNAL_UPDATED")
@@ -465,6 +486,11 @@ def send_signal_updated(
         fields.append(_field("Cons. WR", f"`{conservative_wr_pct:.1f}%`"))
     if folds_appeared is not None and total_folds is not None and total_folds > 0:
         fields.append(_field("Folds", f"`{folds_appeared}/{total_folds}`"))
+    if obi_threshold is not None:
+        if obi_threshold > 0.0 and obi_depth:
+            fields.append(_field("OBI Gate", f"`{obi_threshold:.2f}@{obi_depth}`"))
+        else:
+            fields.append(_field("OBI Gate", "`off`"))
 
     return _send(
         url,
@@ -496,9 +522,10 @@ def send_generated_signals(
     # Build compact table — show top 10 max
     lines = ["```"]
     lines.append(
-        f"{'#':<4} {'SIDE':<5} {'SCORE':>6} {'EV':>7} {'ENTRY':>6} {'WR':>5} {'CWR':>5} {'FOLDS':>6}"
+        f"{'#':<4} {'SIDE':<5} {'SCORE':>6} {'EV':>7} {'ENTRY':>6} {'WR':>5} "
+        f"{'CWR':>5} {'FOLDS':>6} {'OBI':>9}"
     )
-    lines.append("-" * 52)
+    lines.append("-" * 63)
     for sig in signals[:10]:
         side = sig.get("side", "?")[:4].upper()
         score = sig.get("_smart_score", sig.get("smartScore", 0))
@@ -507,8 +534,12 @@ def send_generated_signals(
         wr = sig.get("oosWinRatePct", 0)
         cwr = sig.get("conservativeWinRatePct", 0)
         folds = f"{sig.get('wfFoldsAppeared', 0)}/{sig.get('wfTotalTestFolds', 0)}"
+        obi_t = float(sig.get("obiThreshold", 0.0) or 0.0)
+        obi_d = str(sig.get("obiDepth", "none") or "none")
+        obi_str = f"{obi_t:.2f}@{obi_d}" if obi_t > 0.0 else "off"
         lines.append(
-            f"{sig.get('rank', 0):<4} {side:<5} {score:>6.1f} {ev:>7.4f} ${entry:>4.2f} {wr:>4.0f}% {cwr:>4.0f}% {folds:>6}"
+            f"{sig.get('rank', 0):<4} {side:<5} {score:>6.1f} {ev:>7.4f} "
+            f"${entry:>4.2f} {wr:>4.0f}% {cwr:>4.0f}% {folds:>6} {obi_str:>9}"
         )
     lines.append("```")
     table = "\n".join(lines)

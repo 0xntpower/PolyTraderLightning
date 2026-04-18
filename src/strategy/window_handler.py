@@ -832,6 +832,8 @@ class WindowEventHandler:
             conservative_wr_pct=new_sc.conservative_win_rate_pct,
             folds_appeared=new_sc.wf_folds_appeared,
             total_folds=new_sc.wf_total_test_folds,
+            obi_threshold=new_sc.obi_threshold,
+            obi_depth=new_sc.obi_depth.value,
         )
 
         if same_signal:

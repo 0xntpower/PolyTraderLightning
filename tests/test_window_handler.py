@@ -49,7 +49,9 @@ class FakeMarketState:
     down_token_id = "token_down"
     time_remaining = 200.0
     has_fresh_book_data = True
-    binance_obi = 0.0
+    binance_obi_d5 = 0.0
+    binance_obi_d10 = 0.0
+    binance_obi_d20 = 0.0
 
     def __init__(self):
         self.end_snapshot = None
@@ -1003,7 +1005,9 @@ class TestOnWindowTransition:
             cl_direction_from_open_pct=0.001,
             poly_spread_up=0.0,
             poly_spread_down=0.0,
-            binance_obi=0.0,
+            binance_obi_d5=0.0,
+            binance_obi_d10=0.0,
+            binance_obi_d20=0.0,
             time_remaining=200.0,
         )
         mock_snap_signal.return_value = mock_signal.return_value
@@ -1045,7 +1049,9 @@ class TestBankrollSyncTiming:
             cl_direction_from_open_pct=0.001,
             poly_spread_up=0.0,
             poly_spread_down=0.0,
-            binance_obi=0.0,
+            binance_obi_d5=0.0,
+            binance_obi_d10=0.0,
+            binance_obi_d20=0.0,
             time_remaining=200.0,
         )
         mock_snap_signal.return_value = mock_signal.return_value
@@ -1083,7 +1089,9 @@ class TestBankrollSyncTiming:
             cl_direction_from_open_pct=0.001,
             poly_spread_up=0.0,
             poly_spread_down=0.0,
-            binance_obi=0.0,
+            binance_obi_d5=0.0,
+            binance_obi_d10=0.0,
+            binance_obi_d20=0.0,
             time_remaining=200.0,
         )
         mock_snap_signal.return_value = mock_signal.return_value

@@ -34,7 +34,7 @@ from typing import Any
 
 from shared.errors import SignalError
 from strategy.momentum_signal import MomentumSignalConfig
-from strategy.signal import Direction
+from strategy.signal import Direction, ObiDepth
 
 log = logging.getLogger(__name__)
 
@@ -240,6 +240,44 @@ def validate_momentum_signal(
     # otherwise fire requires |bnObi| >= this with the right sign.
     obi_threshold = _finite_float("obiThreshold", data["obiThreshold"])
 
+    # Per-signal OBI depth: "D10", "D20", or "none". Engine emits "none"
+    # whenever obiThreshold == 0.0 (depth is meaningless when gate is off).
+    # Older signals without the field default to "none" and the threshold
+    # must therefore also be 0 — reject the combination where threshold is
+    # enabled but depth is missing, since the bot would not know which
+    # depth column to read from the live Binance feed.
+    obi_depth_raw = data.get("obiDepth", "none")
+    if not isinstance(obi_depth_raw, str):
+        raise SignalValidationError(
+            "obiDepth",
+            f"must be a string ('D10', 'D20', or 'none'), got {type(obi_depth_raw).__name__}",
+        )
+    obi_depth_key = obi_depth_raw.strip().upper()
+    if obi_depth_key in ("NONE", ""):
+        obi_depth = ObiDepth.NONE
+    elif obi_depth_key == "D10":
+        obi_depth = ObiDepth.D10
+    elif obi_depth_key == "D20":
+        obi_depth = ObiDepth.D20
+    else:
+        raise SignalValidationError(
+            "obiDepth",
+            f"unrecognized value {obi_depth_raw!r} — expected 'D10', 'D20', or 'none'",
+        )
+    if obi_threshold > 0.0 and obi_depth is ObiDepth.NONE:
+        raise SignalValidationError(
+            "obiDepth",
+            f"obiThreshold={obi_threshold} > 0 requires obiDepth of 'D10' or 'D20'",
+        )
+    if obi_threshold == 0.0 and obi_depth is not ObiDepth.NONE:
+        warnings.append(
+            SignalValidationWarning(
+                "obiDepth",
+                f"obiThreshold=0 with obiDepth={obi_depth.value} — depth is ignored "
+                "because the OBI gate is disabled",
+            )
+        )
+
     # Post-fire erosion threshold from engine (nested in "postFire" object)
     post_fire_max_safe_erosion_pct: float | None = None
     post_fire_raw = data.get("postFire")
@@ -277,6 +315,7 @@ def validate_momentum_signal(
         wf_fold_indices=wf_fold_indices,
         post_fire_max_safe_erosion_pct=post_fire_max_safe_erosion_pct,
         obi_threshold=obi_threshold,
+        obi_depth=obi_depth,
     )
 
     # --- Completeness check: every field the engine produces must arrive ---

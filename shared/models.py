@@ -43,6 +43,11 @@ class SignalConfig:
     post_fire_loss_median_erosion_pct: float = 0.0
     post_fire_win_samples: int = 0
     post_fire_loss_samples: int = 0
+    # v4: per-signal OBI gate carried end-to-end from engine → orchestrator →
+    # bot IPC. Both fields must round-trip so the bot's signal_loader can
+    # apply the same gate the engine trained on.
+    obi_threshold: float = 0.0
+    obi_depth: str = "none"
 
     @classmethod
     def from_engine_json(cls, data: dict[str, Any]) -> SignalConfig:
@@ -54,6 +59,8 @@ class SignalConfig:
             observe_to_s=data.get("observeToS", 0.0),
             min_delta_pct=data.get("minDeltaPct", 0.0),
             max_variance_pct=data.get("maxVariancePct", 0.0),
+            obi_threshold=float(data.get("obiThreshold", 0.0)),
+            obi_depth=str(data.get("obiDepth", "none")),
             train_wins=data.get("trainWins", 0),
             train_matches=data.get("trainMatches", 0),
             train_win_rate_pct=data.get("trainWinRatePct", 0.0),
@@ -102,6 +109,8 @@ class SignalConfig:
             "observeToS": self.observe_to_s,
             "minDeltaPct": self.min_delta_pct,
             "maxVariancePct": self.max_variance_pct,
+            "obiThreshold": self.obi_threshold,
+            "obiDepth": self.obi_depth,
             "trainWins": self.train_wins,
             "trainMatches": self.train_matches,
             "trainWinRatePct": self.train_win_rate_pct,
@@ -147,8 +156,16 @@ class SignalConfig:
         )
 
     @property
+    def obi_label(self) -> str:
+        """Compact OBI gate label for logs and Discord. ``off`` when the
+        gate is disabled; ``{threshold:.2f}@{depth}`` otherwise."""
+        if self.obi_threshold <= 0.0:
+            return "off"
+        return f"{self.obi_threshold:.2f}@{self.obi_depth}"
+
+    @property
     def label(self) -> str:
         return (
             f"#{self.rank} {self.side} [{self.observe_from_s:.0f}s->{self.observe_to_s:.0f}s] "
-            f"d>={self.min_delta_pct}% v<={self.max_variance_pct}%"
+            f"d>={self.min_delta_pct}% v<={self.max_variance_pct}% obi={self.obi_label}"
         )

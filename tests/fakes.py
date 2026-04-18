@@ -39,6 +39,8 @@ class FakeOrderExecutor:
         self.filled_orders: set[str] = set()
         self.cancelled_orders: set[str] = set()
         self._rule_triggered: tuple[int, str, object] | None = None
+        self._rule_obi_threshold: float = 0.0
+        self._rule_obi_depth: str = "none"
         self._kelly_fields: dict | None = None
 
     async def place_maker_order(
@@ -71,8 +73,17 @@ class FakeOrderExecutor:
     def is_order_filled(self, order_id: str) -> bool:
         return order_id in self.filled_orders
 
-    def set_rule_triggered(self, rule_id: int, direction: str, signal: object) -> None:
+    def set_rule_triggered(
+        self,
+        rule_id: int,
+        direction: str,
+        signal: object,
+        obi_threshold: float = 0.0,
+        obi_depth: str = "none",
+    ) -> None:
         self._rule_triggered = (rule_id, direction, signal)
+        self._rule_obi_threshold = obi_threshold
+        self._rule_obi_depth = obi_depth
 
     def set_kelly_fields(self, **kwargs) -> None:
         self._kelly_fields = kwargs

@@ -69,7 +69,9 @@ def _make_signal(bn_direction_from_open_pct: float = 0.001) -> Signal:
         cl_direction_from_open_pct=bn_direction_from_open_pct,
         poly_spread_up=0.0,
         poly_spread_down=0.0,
-        binance_obi=0.0,
+        binance_obi_d5=0.0,
+        binance_obi_d10=0.0,
+        binance_obi_d20=0.0,
         time_remaining=200.0,
     )
 

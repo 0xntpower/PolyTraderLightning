@@ -209,7 +209,9 @@ class SignalLifecycle:
         bn_dir_pct = signal.bn_direction_from_open_pct * 100.0
 
         if sc.observe_to_s <= time_remaining <= sc.observe_from_s:
-            self._shadow.signal._accumulate(bn_dir_pct, time_remaining, signal.binance_obi)
+            self._shadow.signal._accumulate(
+                bn_dir_pct, time_remaining, self._shadow.signal._gate_obi(signal)
+            )
         elif time_remaining < sc.observe_to_s and not self._shadow.signal._fired:
             self._shadow.signal._fired = True
             if self._shadow.signal._conditions_met():

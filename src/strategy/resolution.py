@@ -575,6 +575,8 @@ class ResolutionManager:
                 size_usd=size_usd,
                 balance=self._bankroll_tracker.bankroll,
                 market_outcome=outcome,
+                obi_threshold=sc.obi_threshold,
+                obi_depth=sc.obi_depth.value,
             )
 
         # Journal record

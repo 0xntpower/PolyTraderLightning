@@ -43,6 +43,8 @@ class WindowRecord:
     direction: str = ""
     rule_triggered: int | None = None
     rule_direction: str = ""
+    rule_obi_threshold: float = 0.0
+    rule_obi_depth: str = "none"
     rule_entry_price: float = 0.0
     rule_simulated_fill: bool = False
     rule_signal_features: dict[str, float] | None = None
@@ -113,10 +115,19 @@ class PaperOrderManager:
         self._orders.clear()
         self._current_record = WindowRecord(window_ts=window_ts)
 
-    def set_rule_triggered(self, rule_id: int, direction: str, signal: Signal | None) -> None:
+    def set_rule_triggered(
+        self,
+        rule_id: int,
+        direction: str,
+        signal: Signal | None,
+        obi_threshold: float = 0.0,
+        obi_depth: str = "none",
+    ) -> None:
         """Called by MomentumSignalStrategy after a successful order placement."""
         self._current_record.rule_triggered = rule_id
         self._current_record.rule_direction = direction
+        self._current_record.rule_obi_threshold = obi_threshold
+        self._current_record.rule_obi_depth = obi_depth
         if signal is not None:
             self._current_record.rule_signal_features = signal.as_feature_dict()
 
@@ -520,4 +531,6 @@ class PaperOrderManager:
                 size_usd=rec.final_bet_size or 0.0,
                 balance=self._balance,
                 market_outcome=rec.actual_outcome,
+                obi_threshold=rec.rule_obi_threshold,
+                obi_depth=rec.rule_obi_depth,
             )

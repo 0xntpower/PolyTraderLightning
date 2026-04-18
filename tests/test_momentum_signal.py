@@ -51,6 +51,8 @@ def _make_signal(
     bn_direction_from_open_pct: float = 0.0,
     binance_obi: float = 0.0,
 ) -> Signal:
+    # Tests pass a single ``binance_obi`` for brevity — mirror it into every
+    # depth field so gate behavior is depth-agnostic for these fixtures.
     return Signal(
         delta_pct=delta_pct,
         direction=direction,
@@ -59,7 +61,9 @@ def _make_signal(
         cl_direction_from_open_pct=bn_direction_from_open_pct,
         poly_spread_up=0.0,
         poly_spread_down=0.0,
-        binance_obi=binance_obi,
+        binance_obi_d5=binance_obi,
+        binance_obi_d10=binance_obi,
+        binance_obi_d20=binance_obi,
         time_remaining=200.0,
     )
 

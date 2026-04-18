@@ -19,6 +19,8 @@ class KellyTelemetrySnapshot(TypedDict, total=False):
 
     rule_triggered: int
     rule_direction: str
+    rule_obi_threshold: float
+    rule_obi_depth: str
     rule_signal_features: dict[str, float]
     kelly_adjusted_p: float | None
     kelly_vol_discount: float | None
@@ -74,6 +76,8 @@ class OrderExecutor(Protocol):
         rule_id: int,
         direction: str,
         signal: Signal | None,
+        obi_threshold: float = 0.0,
+        obi_depth: str = "none",
     ) -> None: ...
 
     def set_kelly_fields(self, **kwargs: float | bool | None) -> None: ...

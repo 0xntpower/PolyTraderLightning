@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 
 from shared.discord import send_bet_placed, send_early_exit
 from strategy.kelly import AdjustedWinRateResult, KellyResult, conservative_win_rate, kelly_size
-from strategy.signal import Direction, Signal
+from strategy.signal import Direction, ObiDepth, Signal
 
 if TYPE_CHECKING:
     from config import ErosionConfig, RulesStrategyConfig, SizingConfig
@@ -57,6 +57,9 @@ class MomentumSignalConfig:
     # v3.4: per-signal OBI threshold from engine sweep. 0.0 = gate disabled;
     # otherwise fire requires |latest_obi| >= threshold with the right sign.
     obi_threshold: float = 0.0
+    # Depth level the engine trained the OBI gate at (D10 or D20). NONE
+    # whenever ``obi_threshold == 0.0`` — depth is meaningless with no gate.
+    obi_depth: ObiDepth = ObiDepth.NONE
 
     def __post_init__(self) -> None:
         if self.observe_from_s <= self.observe_to_s:
@@ -68,6 +71,11 @@ class MomentumSignalConfig:
             raise ValueError(f"min_delta_pct must be >= 0, got {self.min_delta_pct}")
         if self.oos_win_rate_pct < 0 or self.oos_win_rate_pct > 100:
             raise ValueError(f"oos_win_rate_pct must be 0-100, got {self.oos_win_rate_pct}")
+        if self.obi_threshold > 0.0 and self.obi_depth is ObiDepth.NONE:
+            raise ValueError(
+                f"obi_threshold={self.obi_threshold} > 0 requires "
+                f"obi_depth of D10 or D20, got {self.obi_depth}"
+            )
 
     @property
     def signal_id(self) -> str:
@@ -224,6 +232,18 @@ class MomentumSignalStrategy:
     # Private helpers
     # ------------------------------------------------------------------
 
+    def _gate_obi(self, signal: Signal) -> float:
+        """Centered OBI at the depth the engine trained this signal at.
+
+        When ``obi_depth`` is ``NONE`` (gate disabled), the rolling-OBI
+        regime filter still runs, and D20 is the canonical "deepest book
+        reading available" to drive that broader skip check.
+        """
+        depth = self.signal_cfg.obi_depth
+        if depth is ObiDepth.NONE:
+            return signal.binance_obi_d20
+        return signal.obi_at(depth)
+
     def _accumulate(self, bn_dir_pct: float, time_remaining: float, obi: float) -> None:
         """Add one sample (in percent) using Welford's online algorithm.
 
@@ -301,6 +321,8 @@ class MomentumSignalStrategy:
         # v3.4: per-signal OBI threshold (0.0 = gate disabled). Fire requires
         # |_latest_obi| >= threshold with the right sign. Matches the engine
         # sweeper's per-config gate (core/Config.hpp kObiThresholdLevels).
+        # ``_latest_obi`` holds the value at ``signal_cfg.obi_depth`` (D10 or
+        # D20) — set in ``_accumulate`` via ``_gate_obi(signal)``.
         if sc.obi_threshold > 0.0:
             if sc.side == Direction.UP and self._latest_obi < sc.obi_threshold:
                 return False
@@ -642,7 +664,13 @@ class MomentumSignalStrategy:
         self.last_size_usd = size_usd
         self.bet_scale = self.sprt_factor
 
-        order_mgr.set_rule_triggered(sc.rank, sc.side.value, self._fire_signal)
+        order_mgr.set_rule_triggered(
+            sc.rank,
+            sc.side.value,
+            self._fire_signal,
+            obi_threshold=sc.obi_threshold,
+            obi_depth=sc.obi_depth.value,
+        )
         _kr = self.last_kelly_result
         _wr = self.kelly_wr_result
         order_mgr.set_kelly_fields(
@@ -669,6 +697,9 @@ class MomentumSignalStrategy:
             rank=sc.rank,
             order_id=order_id,
             entry_type=entry_type,
+            obi_threshold=sc.obi_threshold,
+            obi_depth=sc.obi_depth.value,
+            obi_observed=self._latest_obi,
         )
 
     async def _monitor_maker_entry(
@@ -845,7 +876,7 @@ class MomentumSignalStrategy:
 
         if sc.observe_to_s <= time_remaining <= sc.observe_from_s:
             # Inside observation window — accumulate, don't fire yet
-            self._accumulate(bn_dir_pct, time_remaining, signal.binance_obi)
+            self._accumulate(bn_dir_pct, time_remaining, self._gate_obi(signal))
             return
 
         if time_remaining >= sc.observe_from_s:
@@ -862,7 +893,7 @@ class MomentumSignalStrategy:
         ):
             grace_floor = sc.observe_to_s - self.cfg.post_observe_grace_s
             if time_remaining >= grace_floor:
-                self._accumulate(bn_dir_pct, time_remaining, signal.binance_obi)
+                self._accumulate(bn_dir_pct, time_remaining, self._gate_obi(signal))
                 return
 
         # Window (+ grace if applicable) has elapsed — evaluate once.
@@ -1177,11 +1208,15 @@ class MomentumSignalStrategy:
         self.bet_scale = self.sprt_factor
         tier = f"momentum{sc.rank}"
 
+        obi_gate = (
+            f"{sc.obi_threshold:.2f}@{sc.obi_depth.value}" if sc.obi_threshold > 0.0 else "off"
+        )
         log.info(
             "FIRED rank=%d side=%s t=%.1fs "
             "dir=%.4f%% stddev=%.4f%% n=%d "
             "oos_wr=%.1f%% bh_p=%.3g "
-            "avg_entry=%.2f ask=%.2f size=$%.2f",
+            "avg_entry=%.2f ask=%.2f size=$%.2f "
+            "obi_gate=%s obs_obi=%+.4f",
             sc.rank,
             sc.side.value,
             time_remaining,
@@ -1193,6 +1228,8 @@ class MomentumSignalStrategy:
             sc.avg_entry_price or 0.0,
             entry_price,
             size_usd,
+            obi_gate,
+            self._latest_obi,
         )
 
         # --- Maker-first entry ---

@@ -236,8 +236,9 @@ def validate_momentum_signal(
     wf_total_test_folds = int(data.get("wfTotalTestFolds", 0) or 0)
     wf_fold_indices = [int(i) for i in data.get("wfFoldIndices", [])]
 
-    # OBI confirmation flag from engine
-    require_obi_confirmation = bool(data.get("requireObiConfirmation", False))
+    # v3.4: per-signal OBI threshold from engine. 0.0 = gate disabled;
+    # otherwise fire requires |bnObi| >= this with the right sign.
+    obi_threshold = _finite_float("obiThreshold", data["obiThreshold"])
 
     # Post-fire erosion threshold from engine (nested in "postFire" object)
     post_fire_max_safe_erosion_pct: float | None = None
@@ -275,7 +276,7 @@ def validate_momentum_signal(
         wf_total_test_folds=wf_total_test_folds,
         wf_fold_indices=wf_fold_indices,
         post_fire_max_safe_erosion_pct=post_fire_max_safe_erosion_pct,
-        require_obi_confirmation=require_obi_confirmation,
+        obi_threshold=obi_threshold,
     )
 
     # --- Completeness check: every field the engine produces must arrive ---

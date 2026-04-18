@@ -54,7 +54,9 @@ class MomentumSignalConfig:
     wf_total_test_folds: int = 0  # Total WF test folds
     wf_fold_indices: list[int] = field(default_factory=list)
     post_fire_max_safe_erosion_pct: float | None = None  # P90 win erosion threshold from engine
-    require_obi_confirmation: bool = False  # Require Binance OBI to agree with signal direction
+    # v3.4: per-signal OBI threshold from engine sweep. 0.0 = gate disabled;
+    # otherwise fire requires |latest_obi| >= threshold with the right sign.
+    obi_threshold: float = 0.0
 
     def __post_init__(self) -> None:
         if self.observe_from_s <= self.observe_to_s:
@@ -296,12 +298,13 @@ class MomentumSignalStrategy:
                 return False
         elif self._latest_pct > -sc.min_delta_pct:
             return False
-        # OBI confirmation: Binance order book imbalance must agree with direction
-        if sc.require_obi_confirmation:
-            obi_min = 0.05  # matches engine's kSweepObiMinAbs
-            if sc.side == Direction.UP and self._latest_obi < obi_min:
+        # v3.4: per-signal OBI threshold (0.0 = gate disabled). Fire requires
+        # |_latest_obi| >= threshold with the right sign. Matches the engine
+        # sweeper's per-config gate (core/Config.hpp kObiThresholdLevels).
+        if sc.obi_threshold > 0.0:
+            if sc.side == Direction.UP and self._latest_obi < sc.obi_threshold:
                 return False
-            if sc.side == Direction.DOWN and self._latest_obi > -obi_min:
+            if sc.side == Direction.DOWN and self._latest_obi > -sc.obi_threshold:
                 return False
         return True
 
@@ -946,10 +949,10 @@ class MomentumSignalStrategy:
                 return
 
         # v3.2 §5.7: rolling-OBI gate. The engine's spot-OBI confirmation
-        # (require_obi_confirmation → _latest_obi) flips on a single depth
-        # update; averaging over the last obi_rolling_window_s gives a
-        # flow-direction read that survives individual-tick noise. Skip if
-        # the smoothed OBI opposes signal direction by ≥ skip_threshold.
+        # (obi_threshold → _latest_obi) flips on a single depth update;
+        # averaging over the last obi_rolling_window_s gives a flow-direction
+        # read that survives individual-tick noise. Skip if the smoothed OBI
+        # opposes signal direction by ≥ skip_threshold.
         if self.cfg.obi_rolling_gate_enabled and self.cfg.obi_rolling_window_s > 0.0:
             mean_obi, n_obi = self._mean_recent_obi(self.cfg.obi_rolling_window_s)
             if n_obi >= self.cfg.obi_rolling_min_samples:

@@ -14,7 +14,7 @@ See `docs/infrastructure/vps_deployment.md` for full deployment details.
 - **250ms strategy tick** — evaluates signal entry conditions every quarter second
 - **Kelly Criterion bet sizing** — quarter-Kelly with regime-adjusted win probabilities
 - **SPRT decay detection** — detects signal degradation and enters shadow tracking mode
-- **Regime adjustments** — volatility, chop, and outcome-bias discounts on win probability (combined cap `kelly_regime_cap = 0.12`)
+- **Regime adjustments** — volatility, chop, and outcome-bias discounts on win probability, combined via the v3.2 **soft-OR** rule (`kelly_regime_cap_2_axes = 0.20`, `kelly_regime_cap_3_axes = 0.30`) plus a hostile-regime gate that halves Kelly at 0.15 aggregate hostility and skips the trade entirely at 0.25
 - **Post-fire CUSUM erosion exit** — early exit if price action moves too hard against the open position
 - **Paper and live modes** — full simulation with identical logic, or real CLOB execution
 

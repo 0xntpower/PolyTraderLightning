@@ -244,7 +244,7 @@ class OrderManager:
             self._breaker.record_failure()
             log.warning("early exit SELL timed out after %.0fs", _CLOB_CALL_TIMEOUT_SEC)
             return None
-        except (OSError, ValueError, KeyError) as exc:
+        except (OSError, ValueError, KeyError, PolyApiException) as exc:
             self._breaker.record_failure()
             log.warning("early exit SELL failed: %s", exc)
             return None
@@ -408,7 +408,7 @@ class OrderManager:
         except TimeoutError:
             log.warning("cancel_order timed out for %s", order_id[:12])
             return False
-        except (OSError, ValueError, KeyError) as exc:
+        except (OSError, ValueError, KeyError, PolyApiException) as exc:
             # May have been filled while we were cancelling
             if order_id in self.state.live_fills:
                 return False
@@ -489,7 +489,7 @@ class OrderManager:
             self._breaker.record_failure()
             log.warning("%s maker order timed out after %.0fs", tier, _CLOB_CALL_TIMEOUT_SEC)
             return None
-        except (OSError, ValueError, KeyError) as exc:
+        except (OSError, ValueError, KeyError, PolyApiException) as exc:
             self.risk.tracker.remove_exposure(size_usd)
             self._breaker.record_failure()
             log.warning("%s maker order failed: %s", tier, exc)
@@ -577,7 +577,7 @@ class OrderManager:
             self._breaker.record_failure()
             log.warning("%s taker order timed out after %.0fs", tier, _CLOB_CALL_TIMEOUT_SEC)
             return None
-        except (OSError, ValueError, KeyError) as exc:
+        except (OSError, ValueError, KeyError, PolyApiException) as exc:
             self.risk.tracker.remove_exposure(size_usd)
             self._breaker.record_failure()
             log.warning("%s taker order failed: %s", tier, exc)
@@ -637,7 +637,7 @@ class OrderManager:
                     log.warning(
                         "cancel timed out for %s after %.0fs", order_id[:12], _CLOB_CALL_TIMEOUT_SEC
                     )
-                except (OSError, ValueError, KeyError) as exc:
+                except (OSError, ValueError, KeyError, PolyApiException) as exc:
                     # Cancel failure on a filled order is expected — check
                     # if a fill arrived while we were trying to cancel
                     if order_id in self.state.live_fills:

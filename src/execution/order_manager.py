@@ -9,10 +9,14 @@ from functools import partial
 from typing import TYPE_CHECKING, Any
 
 from py_clob_client.clob_types import (  # type: ignore[import-untyped]  # no stubs available
+    AssetType,
     BalanceAllowanceParams,
     MarketOrderArgs,
     OrderArgs,
     OrderType,
+)
+from py_clob_client.exceptions import (  # type: ignore[import-untyped]  # no stubs available
+    PolyApiException,
 )
 from py_clob_client.order_builder.constants import (  # type: ignore[import-untyped]  # no stubs available
     BUY,
@@ -344,6 +348,7 @@ class OrderManager:
                     self._clob_exec,
                     lambda: self.clob.get_balance_allowance(
                         BalanceAllowanceParams(
+                            asset_type=AssetType.COLLATERAL,
                             signature_type=self.cfg.connections.signature_type,
                         )
                     ),
@@ -358,7 +363,7 @@ class OrderManager:
         except TimeoutError:
             log.warning("refresh_balance timed out after %.0fs", _CLOB_CALL_TIMEOUT_SEC)
             return self._cached_balance_usd
-        except (OSError, ValueError, KeyError) as exc:
+        except (OSError, ValueError, KeyError, PolyApiException) as exc:
             log.warning("failed to refresh on-chain balance: %s", exc)
             return self._cached_balance_usd
 

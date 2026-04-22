@@ -177,6 +177,17 @@ class WindowEventHandler:
         # Mutable state managed by the handler
         self._warmup_alert_sent = False
         self._last_bankroll_sync = 0.0
+        # Warmup-transition tracking must live on the handler, not on the
+        # strategy: the strategy instance is replaced by _handle_signal_swap
+        # and a freshly-built MomentumSignalStrategy defaults warmup_active
+        # to False, which swallows the True→False transition when a swap
+        # coincides with warmup expiry (post-mortem 2026-04-22 §H4, v3.4
+        # §5.1). Initialize from the same formula used per-window so a
+        # mid-warmup restart resumes correctly.
+        _warmup_secs_init = cfg.sizing.warmup_minutes * 60
+        self._warmup_was_active: bool = (
+            _warmup_secs_init > 0 and (time.time() - bot_start_time) < _warmup_secs_init
+        )
 
     @property
     def is_frozen_by_cooldown(self) -> bool:
@@ -1073,13 +1084,19 @@ class WindowEventHandler:
         strategy.sizing_cfg = cfg.sizing
         strategy.erosion_cfg = cfg.erosion
 
-        # Warmup clamp
+        # Warmup clamp. Transition detection reads from the handler-owned
+        # flag (survives signal swaps); the strategy attribute is still
+        # written every window so the fire-time sizing clamp continues to
+        # read a current value. See __init__ comment for the swap-swallow
+        # rationale.
         _warmup_secs = cfg.sizing.warmup_minutes * 60
-        _was_warming_up = strategy.warmup_active
-        strategy.warmup_active = (
+        _warmup_active_now = (
             _warmup_secs > 0 and (time.time() - self._bot_start_time) < _warmup_secs
         )
-        if _was_warming_up and not strategy.warmup_active and not self._warmup_alert_sent:
+        _was_warming_up = self._warmup_was_active
+        self._warmup_was_active = _warmup_active_now
+        strategy.warmup_active = _warmup_active_now
+        if _was_warming_up and not _warmup_active_now and not self._warmup_alert_sent:
             self._warmup_alert_sent = True
             _wu_mode = order_mgr.mode
             _wu_wr = (

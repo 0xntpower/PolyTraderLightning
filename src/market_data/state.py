@@ -19,20 +19,32 @@ class ChainlinkTick(NamedTuple):
 
 
 @dataclass
-class LiveFill:  # mutable: confirmed field updated on CLOB status transitions (MATCHED→CONFIRMED)
-    """Tracks a confirmed fill from the CLOB user WebSocket."""
+class LiveFill:  # mutable: confirmed / size updated as trade events arrive
+    """Tracks fills for a single order from the CLOB user WebSocket.
+
+    ``size``, ``size_usd`` and ``price`` aggregate across every distinct
+    trade that matches this ``order_id``. ``seen_trade_ids`` is the
+    dedupe set used by ``clob_user_ws._handle_trade`` to distinguish a
+    status transition (MATCHED → MINED → CONFIRMED of the same trade)
+    from a genuinely new partial fill against the same resting order —
+    the former only promotes ``confirmed``, the latter accumulates size.
+    """
 
     order_id: str
     token_id: str
     side: str  # "BUY" or "SELL"
-    price: float  # fill price
+    price: float  # volume-weighted fill price across all trades on this order
     size: float  # accumulated fill size (shares)
     size_usd: float  # accumulated USDC spent (price * size per partial fill)
     fill_time: float  # timestamp of first fill event
-    confirmed: bool = False  # True once status reaches CONFIRMED
+    confirmed: bool = False  # True once any status reaches CONFIRMED
     # Whether the originating order was maker (post-only GTC) vs taker (FOK).
     # Read at resolution time to gate the entry-side taker fee in _resolve.
     is_maker: bool = False
+    # Unique trade IDs already accumulated into this fill. A second event
+    # with the same id is treated as a status transition; a new id is a
+    # distinct counterparty match and accumulates size.
+    seen_trade_ids: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True, slots=True)

@@ -48,8 +48,6 @@ async def handle_rtds(
     await ws.send(SUB_CHAINLINK)
     log.info("RTDS subscribed to chainlink")
 
-    _last_msg_ts = 0.0
-
     ping_task = asyncio.create_task(_ping_loop(ws, ping_interval))
     try:
         async for raw in ws:
@@ -68,21 +66,23 @@ async def handle_rtds(
             if topic == "crypto_prices_chainlink":
                 now = time.time()
                 price = float(payload.get("value", 0))
+                oracle_ts_ms = payload.get("timestamp")
                 if price > 0:
                     state.btc_chainlink = price
                     state.btc_chainlink_ts = now
                     state.last_chainlink_msg_ts = now
                     # Buffer tick with oracle's own timestamp for boundary-aligned open price
-                    oracle_ts_ms = payload.get("timestamp")
                     if isinstance(oracle_ts_ms, int) and oracle_ts_ms > 0:
                         from market_data.state import ChainlinkTick
 
                         state.chainlink_tick_buffer.append(
                             ChainlinkTick(oracle_ts_ms=oracle_ts_ms, price=price)
                         )
-                # Record inter-arrival gap as latency proxy
-                if latency is not None and _last_msg_ts > 0:
-                    latency.record_ws("rtds", (now - _last_msg_ts) * 1000)
-                _last_msg_ts = now
+                # True transport lag: oracle stamps the message at emit time,
+                # ``now * 1000 - oracle_ts_ms`` is the wire + processing delay.
+                # The old inter-arrival gap reported Chainlink's ~1 s emit
+                # cadence as "latency", which is the update rate not a delay.
+                if latency is not None and isinstance(oracle_ts_ms, int) and oracle_ts_ms > 0:
+                    latency.record_ws("rtds", max(0.0, now * 1000.0 - oracle_ts_ms))
     finally:
         ping_task.cancel()

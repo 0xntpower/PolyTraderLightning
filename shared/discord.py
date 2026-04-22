@@ -1371,14 +1371,19 @@ def send_latency_report(
             ],
         )
 
-    # Staleness thresholds (seconds since last message)
+    # Staleness thresholds (seconds since last message). clob_user is
+    # event-driven — messages arrive only on our own order / fill events,
+    # so hours of silence are normal during quiet sessions. Threshold
+    # kept well above the 5-min window cadence so a genuinely dead
+    # channel still trips eventually, but routine "no fills this hour"
+    # does not.
     _STALE_THRESHOLDS = {  # noqa: N806  # constant defined in function scope
         "binance": 15,
         "gamma_rest": 600,
         "clob_rest": 600,
         "rtds": 120,
         "clob_market": 30,
-        "clob_user": 60,
+        "clob_user": 3600,
     }
 
     def _status(name: str, samples: int, ago: float) -> str:

@@ -56,8 +56,6 @@ async def handle_clob_user(
     await ws.send(auth_msg)
     log.info("CLOB user channel subscribed")
 
-    _last_msg_ts = 0.0
-
     async def _ping_loop() -> None:
         """CLOB WS requires literal 'PING' text every 10s."""
         while True:
@@ -77,11 +75,22 @@ async def handle_clob_user(
             if not isinstance(msg, dict):
                 continue
 
-            # Record inter-arrival gap
-            now = time.time()
-            if latency is not None and _last_msg_ts > 0:
-                latency.record_ws("clob_user", (now - _last_msg_ts) * 1000)
-            _last_msg_ts = now
+            # Latency = server-emit-time to local-receipt. Trade events carry
+            # a millisecond ``timestamp`` field; order events typically do
+            # too. The old inter-arrival gap approach lumped WS transport
+            # delay together with the MINED→CONFIRMED blockchain
+            # confirmation wait (~8 s), producing confusingly large numbers
+            # and triggering false ⚠️ alerts on every session with a fill.
+            if latency is not None:
+                server_ts_ms = msg.get("timestamp")
+                if server_ts_ms is not None:
+                    try:
+                        ts_ms = float(server_ts_ms)
+                    except (TypeError, ValueError):
+                        ts_ms = 0.0
+                    if ts_ms > 0.0:
+                        now = time.time()
+                        latency.record_ws("clob_user", max(0.0, now * 1000.0 - ts_ms))
 
             event_type = msg.get("event_type", "")
 

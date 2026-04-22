@@ -233,9 +233,23 @@ def resolution_env(tmp_path):
 
 
 def _create_pending(
-    mgr, side=Direction.UP, entry_price=0.85, size_usd=10.0, snapshot_outcome=None, slug="btc-up"
+    mgr,
+    side=Direction.UP,
+    entry_price=0.85,
+    size_usd=10.0,
+    snapshot_outcome=None,
+    slug="btc-up",
+    entry_taker_fee=0.01,
+    maker_usd=0.0,
+    taker_usd=0.0,
 ):
-    """Helper to create a pending resolution."""
+    """Helper to create a pending resolution.
+
+    ``entry_taker_fee`` defaults to 0.01 to match the FakeFeeTracker's fixed
+    fee — post-PR-C the fee is pre-computed at aggregation time by
+    ``window_handler`` rather than inside ``_resolve``, so the test helper
+    mirrors that shape.
+    """
     sc = make_signal_config(side=side)
     return mgr.create_pending(
         window_ts=1000,
@@ -245,6 +259,9 @@ def _create_pending(
         size_usd=size_usd,
         signal_age_windows=5,
         snapshot_outcome=snapshot_outcome,
+        entry_taker_fee=entry_taker_fee,
+        maker_usd=maker_usd,
+        taker_usd=taker_usd,
     )
 
 
@@ -371,6 +388,63 @@ class TestConfirmedResolution:
         result = await mgr.tick(time.time())
         expected_pnl = round(-(shares * entry) - fee, 4)
         assert result.pnl == pytest.approx(expected_pnl, abs=0.001)
+
+    @pytest.mark.asyncio
+    @patch("shared.discord.send_live_wr_checkpoint")
+    @patch("shared.discord.send_bet_result")
+    async def test_combined_entry_passes_split_to_discord(self, mock_bet, mock_wr, resolution_env):
+        """A maker-partial + taker-remainder combined entry must forward the
+        USD split to send_bet_result so the WIN/LOSS embed can render the
+        percent breakdown.
+        """
+        mgr = resolution_env["mgr"]
+        wt = resolution_env["window_tracker"]
+        wt._outcomes["btc-up"] = "up"
+
+        _create_pending(
+            mgr,
+            entry_price=0.78,
+            size_usd=3.16,
+            entry_taker_fee=0.006,
+            maker_usd=0.17,
+            taker_usd=2.99,
+        )
+        mgr._pending.created_at = time.time() - RESOLUTION_POLL_DELAY - 1
+
+        result = await mgr.tick(time.time())
+        assert result.won is True
+
+        assert mock_bet.call_count == 1
+        kwargs = mock_bet.call_args.kwargs
+        assert kwargs["maker_usd"] == pytest.approx(0.17, abs=0.001)
+        assert kwargs["taker_usd"] == pytest.approx(2.99, abs=0.001)
+        assert kwargs["outcome"] == "WIN"
+
+    @pytest.mark.asyncio
+    @patch("shared.discord.send_live_wr_checkpoint")
+    @patch("shared.discord.send_bet_result")
+    async def test_pure_maker_entry_passes_zero_split(self, mock_bet, mock_wr, resolution_env):
+        """Pure-maker entries pass maker_usd>0, taker_usd=0 — embed renders
+        the existing single-label form, not a split.
+        """
+        mgr = resolution_env["mgr"]
+        wt = resolution_env["window_tracker"]
+        wt._outcomes["btc-up"] = "up"
+
+        _create_pending(
+            mgr,
+            entry_price=0.77,
+            size_usd=3.12,
+            entry_taker_fee=0.0,
+            maker_usd=3.12,
+            taker_usd=0.0,
+        )
+        mgr._pending.created_at = time.time() - RESOLUTION_POLL_DELAY - 1
+        await mgr.tick(time.time())
+
+        kwargs = mock_bet.call_args.kwargs
+        assert kwargs["maker_usd"] == pytest.approx(3.12)
+        assert kwargs["taker_usd"] == 0.0
 
 
 # ---------------------------------------------------------------------------

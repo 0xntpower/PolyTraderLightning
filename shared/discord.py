@@ -320,6 +320,8 @@ def send_bet_result(
     size_usd: float,
     balance: float | None = None,
     market_outcome: str | None = None,
+    maker_usd: float = 0.0,
+    taker_usd: float = 0.0,
     obi_threshold: float | None = None,
     obi_depth: str | None = None,
 ) -> bool:
@@ -328,6 +330,11 @@ def send_bet_result(
     ``market_outcome`` is the side the window resolved to (e.g. "up"/"down").
     Shown alongside the bot's bet side so LOSS notifications reveal whether
     the market went against us or a correct bet was exited early.
+
+    When both ``maker_usd`` and ``taker_usd`` are positive the entry was a
+    combined maker-partial + taker-remainder fill — an extra "Fill" field
+    renders the capital split so operators can see how the position was
+    actually built (post-mortem 2026-04-22 §5.2 follow-up).
     """
     is_paper = mode == "paper"
     url = _url("DISCORD_WEBHOOK_PAPER_BETS" if is_paper else "DISCORD_WEBHOOK_LIVE_BETS")
@@ -342,6 +349,11 @@ def send_bet_result(
         _field("Entry", f"`{entry_price:.2f}`"),
         _field("Size", f"`${size_usd:.2f}`"),
     ]
+    if maker_usd > 0.0 and taker_usd > 0.0:
+        total = maker_usd + taker_usd
+        maker_pct = 100.0 * maker_usd / total
+        taker_pct = 100.0 * taker_usd / total
+        fields.append(_field("Fill", f"`Maker {maker_pct:.0f}% / Taker {taker_pct:.0f}%`"))
     if market_outcome:
         fields.append(_field("Market", f"`{market_outcome.upper()}`"))
     if obi_threshold is not None:

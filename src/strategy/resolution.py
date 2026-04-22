@@ -85,7 +85,22 @@ class PendingResolution:
     early_exit_residual_entry: float = 0.0
     # True if the originating entry order was maker (post-only GTC). Maker
     # entries pay no taker fee at entry, so _resolve skips the fee deduction.
+    # For combined maker+taker entries this is False and the fee breakdown
+    # lives on ``entry_taker_fee`` instead.
     is_maker_entry: bool = False
+    # Per-leg capital breakdown for combined (maker partial + taker remainder)
+    # entries — set by ``window_handler._finalize_previous_window`` when it
+    # aggregates across ``state.live_fills``. Both default to 0.0 for paper
+    # mode and for single-leg live entries (use ``size_usd`` + ``is_maker_entry``
+    # in that case). Discord's WIN/LOSS embed renders a percent split when
+    # both are positive.
+    maker_usd: float = 0.0
+    taker_usd: float = 0.0
+    # Pre-computed entry-side taker fee, accumulated across every taker fill
+    # in the window at aggregation time. Supersedes the boolean gate for
+    # combined entries — ``_resolve`` uses this value directly so it handles
+    # mixed maker/taker entries correctly.
+    entry_taker_fee: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,6 +197,9 @@ class ResolutionManager:
         early_exit_residual_shares: float = 0.0,
         early_exit_residual_entry: float = 0.0,
         is_maker_entry: bool = False,
+        maker_usd: float = 0.0,
+        taker_usd: float = 0.0,
+        entry_taker_fee: float = 0.0,
     ) -> ResolutionResult | None:
         """Create a new pending resolution, force-resolving any existing one first.
 
@@ -225,6 +243,9 @@ class ResolutionManager:
             early_exit_residual_shares=early_exit_residual_shares,
             early_exit_residual_entry=early_exit_residual_entry,
             is_maker_entry=is_maker_entry,
+            maker_usd=maker_usd,
+            taker_usd=taker_usd,
+            entry_taker_fee=entry_taker_fee,
         )
         log.info(
             "trade pending resolution: window=%d slug=%s "
@@ -488,14 +509,14 @@ class ResolutionManager:
                 outcome,
             )
         else:
-            # Entry-side taker fee: only charged when the entry order filled as
-            # a taker. Maker (post-only GTC) entries pay no fee at entry, and
-            # binary resolution isn't a new trade, so no exit fee applies either.
-            taker_fee = (
-                0.0
-                if pr.is_maker_entry
-                else self._fee_tracker.record_taker_fee(entry_price, shares)
-            )
+            # Entry-side taker fee: pre-computed at aggregation time by
+            # ``window_handler._finalize_previous_window`` so combined
+            # (maker partial + taker remainder) entries pay fee on only the
+            # taker portion. ``entry_taker_fee`` is 0 for pure-maker entries
+            # and equals ``compute_taker_fee(entry_price, shares)`` for
+            # pure-taker entries, matching the old boolean semantic. Binary
+            # resolution isn't a new trade, so no exit fee applies either.
+            taker_fee = pr.entry_taker_fee
 
             bet_won = outcome == sc.side.value
             if bet_won:
@@ -575,6 +596,8 @@ class ResolutionManager:
                 size_usd=size_usd,
                 balance=self._bankroll_tracker.bankroll,
                 market_outcome=outcome,
+                maker_usd=pr.maker_usd,
+                taker_usd=pr.taker_usd,
                 obi_threshold=sc.obi_threshold,
                 obi_depth=sc.obi_depth.value,
             )

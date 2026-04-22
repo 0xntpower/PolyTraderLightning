@@ -449,3 +449,76 @@ def test_discord_entry_field_single_label_for_pure_taker() -> None:
 
     embeds = mock_send.call_args.args[1]
     assert _extract_entry_field(embeds) == "`Taker`"
+
+
+# ---------------------------------------------------------------------------
+# WIN/LOSS embed — Fill field shows the split for combined entries
+# ---------------------------------------------------------------------------
+
+
+def _extract_fill_field(embeds: list[dict]) -> str:
+    for e in embeds:
+        for f in e.get("fields", []):
+            if f.get("name") == "Fill":
+                return str(f.get("value", ""))
+    return ""
+
+
+def test_discord_win_loss_embed_renders_split_for_combined_entry() -> None:
+    from shared.discord import send_bet_result
+
+    with patch("shared.discord._send", return_value=True) as mock_send:
+        send_bet_result(
+            mode="live",
+            outcome="WIN",
+            pnl=0.89,
+            entry_price=0.78,
+            side="down",
+            size_usd=3.16,
+            maker_usd=0.17,
+            taker_usd=2.99,
+        )
+
+    embeds = mock_send.call_args.args[1]
+    # 0.17 / 3.16 = 5.4 %, 2.99 / 3.16 = 94.6 % → rounded.
+    assert _extract_fill_field(embeds) == "`Maker 5% / Taker 95%`"
+
+
+def test_discord_win_loss_embed_omits_fill_field_for_pure_maker() -> None:
+    from shared.discord import send_bet_result
+
+    with patch("shared.discord._send", return_value=True) as mock_send:
+        send_bet_result(
+            mode="live",
+            outcome="WIN",
+            pnl=0.23,
+            entry_price=0.77,
+            side="down",
+            size_usd=3.12,
+            maker_usd=3.12,
+            taker_usd=0.0,
+        )
+
+    embeds = mock_send.call_args.args[1]
+    # No Fill field when not combined — preserves the existing single-entry
+    # embed for pure-maker and pure-taker fills.
+    assert _extract_fill_field(embeds) == ""
+
+
+def test_discord_win_loss_embed_omits_fill_field_for_pure_taker() -> None:
+    from shared.discord import send_bet_result
+
+    with patch("shared.discord._send", return_value=True) as mock_send:
+        send_bet_result(
+            mode="live",
+            outcome="LOSS",
+            pnl=-3.12,
+            entry_price=0.78,
+            side="up",
+            size_usd=3.12,
+            maker_usd=0.0,
+            taker_usd=3.12,
+        )
+
+    embeds = mock_send.call_args.args[1]
+    assert _extract_fill_field(embeds) == ""

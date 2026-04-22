@@ -376,8 +376,14 @@ class WindowEventHandler:
         source = "paper" if is_paper else "live"
 
         rec = order_mgr._current_record if is_paper else None  # type: ignore[union-attr]  # mode=="paper" guarantees PaperOrderManager
-        _live_fill = next(iter(state.live_fills.values()), None) if not is_paper else None
-        _live_filled = _live_fill is not None
+        # Aggregate across every BUY fill for this window — a combined
+        # maker-partial + taker-remainder entry lands two fills in
+        # state.live_fills, and picking only the first would under-count
+        # the actual on-chain position (post-mortem 2026-04-22 §5.2 follow-up).
+        _live_buy_fills = (
+            [f for f in state.live_fills.values() if f.side == "BUY"] if not is_paper else []
+        )
+        _live_filled = len(_live_buy_fills) > 0
         filled = rec.rule_simulated_fill if rec else _live_filled
         won: bool | None = None
         pnl = 0.0
@@ -392,20 +398,42 @@ class WindowEventHandler:
             elif pnl < 0:
                 won = False
 
-        # Live mode: actual fill from CLOB user WebSocket
+        # Live mode: actual fill(s) from CLOB user WebSocket
         elif not is_paper and _live_filled:
-            assert _live_fill is not None  # noqa: S101  # guaranteed by _live_filled
-            entry_price = _live_fill.price
-            size_usd = _live_fill.size_usd
+            _total_size_usd = sum(f.size_usd for f in _live_buy_fills)
+            _total_shares = sum(f.size for f in _live_buy_fills)
+            # Volume-weighted average entry price across maker + taker legs.
+            # Falls back to 0 only when total_shares is 0, which implies a
+            # malformed LiveFill; guarded by the entry_price>0 check below.
+            entry_price = _total_size_usd / _total_shares if _total_shares > 0 else 0.0
+            size_usd = _total_size_usd
+            _maker_usd = sum(f.size_usd for f in _live_buy_fills if f.is_maker)
+            _taker_usd = sum(f.size_usd for f in _live_buy_fills if not f.is_maker)
+            # Record the taker fee for each taker leg at its own price so mixed
+            # entries pay fee only on the crossed-spread portion. Maker legs
+            # pay no entry fee. The fee_tracker accumulation happens here so
+            # the totals are correct even if _resolve is minutes away.
+            _entry_taker_fee = sum(
+                self._fee_tracker.record_taker_fee(f.price, f.size)
+                for f in _live_buy_fills
+                if not f.is_maker
+            )
+            # Pure-maker if every leg was a maker; preserves the old
+            # is_maker_entry boolean for consumers that still read it.
+            _is_maker_entry = _taker_usd == 0.0 and _maker_usd > 0.0
             log.info(
-                "live_fill window=%d order=%s "
-                "fill_price=%.4f fill_size=%.2f fill_usd=$%.2f "
+                "live_fill window=%d legs=%d "
+                "entry_price=%.4f total_shares=%.2f total_usd=$%.2f "
+                "maker=$%.2f taker=$%.2f fee=$%.4f "
                 "order_price=%.2f order_size=$%.2f",
                 last_window_ts,
-                _live_fill.order_id[:12],
+                len(_live_buy_fills),
                 entry_price,
-                _live_fill.size,
+                _total_shares,
                 size_usd,
+                _maker_usd,
+                _taker_usd,
+                _entry_taker_fee,
                 strategy.last_entry_price,
                 strategy.last_size_usd,
             )
@@ -444,7 +472,10 @@ class WindowEventHandler:
                     early_exit_pnl=_early_exit[1] if _early_exit is not None else None,
                     early_exit_residual_shares=_early_exit[2] if _early_exit is not None else 0.0,
                     early_exit_residual_entry=_early_exit[3] if _early_exit is not None else 0.0,
-                    is_maker_entry=_live_fill.is_maker,
+                    is_maker_entry=_is_maker_entry,
+                    maker_usd=_maker_usd,
+                    taker_usd=_taker_usd,
+                    entry_taker_fee=_entry_taker_fee,
                 )
                 # Crash recovery between fill and resolution is covered by
                 # TradeJournal.record_trade below; the JSONL is written as a

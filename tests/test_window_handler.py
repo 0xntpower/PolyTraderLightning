@@ -134,6 +134,9 @@ class FakeFeeTracker:
     def compute_taker_fee(self, entry, shares):
         return round(shares * entry * self.fee_rate, 6)
 
+    def record_taker_fee(self, entry, shares):
+        return self.compute_taker_fee(entry, shares)
+
     async def fetch_fee_rate(self, session, url):
         pass
 
@@ -707,6 +710,7 @@ class FakeLiveFill:
     size: float = 10.0
     size_usd: float = 8.40
     is_maker: bool = False
+    side: str = "BUY"
 
 
 class TestLiveTradeOutcome:
@@ -761,6 +765,123 @@ class TestLiveTradeOutcome:
 
         assert len(position_tracker.windows_recorded) == 1
         assert position_tracker.windows_recorded[0]["traded"] is False
+
+    @pytest.mark.asyncio
+    async def test_live_combined_fill_aggregates_across_maker_and_taker(self):
+        """A maker partial + taker remainder lands two LiveFills in the same
+        window. The handler must aggregate (VWAP price, sum size) and pass
+        the maker/taker USD breakdown to the resolution manager — picking only
+        the first fill would misreport the position (post-mortem follow-up
+        to 2026-04-22 §5.2).
+        """
+        from unittest.mock import MagicMock
+
+        resolution_mgr = FakeResolutionManager()
+        resolution_mgr.create_pending = MagicMock(return_value=None)
+
+        state = FakeMarketState()
+        state.live_fills = {
+            "order_maker": FakeLiveFill(
+                order_id="order_maker", price=0.77, size=0.22, size_usd=0.1694, is_maker=True
+            ),
+            "order_taker": FakeLiveFill(
+                order_id="order_taker", price=0.78, size=3.83, size_usd=2.9874, is_maker=False
+            ),
+        }
+
+        handler = _make_handler(state=state, resolution_mgr=resolution_mgr)
+        order_mgr = FakeOrderManager(mode="live")
+        strategy = FakeStrategy()
+        strategy._fired = True
+        strategy._order_placed = True
+
+        with patch("strategy.window_handler.compute_signal_from_snapshot"):
+            handler._process_trade_outcome(
+                strategy, order_mgr, FakeDecayDetector(), last_window_ts=1000
+            )
+
+        assert resolution_mgr.create_pending.call_count == 1
+        kwargs = resolution_mgr.create_pending.call_args.kwargs
+
+        expected_total_usd = 0.1694 + 2.9874
+        expected_total_shares = 0.22 + 3.83
+        expected_vwap = expected_total_usd / expected_total_shares
+
+        assert kwargs["size_usd"] == pytest.approx(expected_total_usd, abs=0.0001)
+        assert kwargs["entry_price"] == pytest.approx(expected_vwap, abs=0.001)
+        assert kwargs["maker_usd"] == pytest.approx(0.1694, abs=0.0001)
+        assert kwargs["taker_usd"] == pytest.approx(2.9874, abs=0.0001)
+        # Mixed entry is NOT pure-maker.
+        assert kwargs["is_maker_entry"] is False
+        # Fee on the taker leg only (FakeFeeTracker: 0.2% of shares * price).
+        # Taker shares = 3.83 at price 0.78 → size_usd*rate = 2.9874 * 0.002 = 0.0059748.
+        expected_fee = round(3.83 * 0.78 * 0.002, 6)
+        assert kwargs["entry_taker_fee"] == pytest.approx(expected_fee, abs=0.0001)
+
+    @pytest.mark.asyncio
+    async def test_live_pure_maker_fill_reports_zero_taker_fee(self):
+        """Single maker fill → is_maker_entry=True, entry_taker_fee=0."""
+        from unittest.mock import MagicMock
+
+        resolution_mgr = FakeResolutionManager()
+        resolution_mgr.create_pending = MagicMock(return_value=None)
+
+        state = FakeMarketState()
+        state.live_fills = {
+            "order_maker": FakeLiveFill(
+                order_id="order_maker", price=0.77, size=4.05, size_usd=3.12, is_maker=True
+            ),
+        }
+
+        handler = _make_handler(state=state, resolution_mgr=resolution_mgr)
+        order_mgr = FakeOrderManager(mode="live")
+        strategy = FakeStrategy()
+        strategy._fired = True
+        strategy._order_placed = True
+
+        with patch("strategy.window_handler.compute_signal_from_snapshot"):
+            handler._process_trade_outcome(
+                strategy, order_mgr, FakeDecayDetector(), last_window_ts=1000
+            )
+
+        kwargs = resolution_mgr.create_pending.call_args.kwargs
+        assert kwargs["maker_usd"] == pytest.approx(3.12, abs=0.01)
+        assert kwargs["taker_usd"] == 0.0
+        assert kwargs["is_maker_entry"] is True
+        assert kwargs["entry_taker_fee"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_live_pure_taker_fill_reports_full_taker_fee(self):
+        """Single taker fill → is_maker_entry=False, entry_taker_fee on total."""
+        from unittest.mock import MagicMock
+
+        resolution_mgr = FakeResolutionManager()
+        resolution_mgr.create_pending = MagicMock(return_value=None)
+
+        state = FakeMarketState()
+        state.live_fills = {
+            "order_taker": FakeLiveFill(
+                order_id="order_taker", price=0.78, size=4.00, size_usd=3.12, is_maker=False
+            ),
+        }
+
+        handler = _make_handler(state=state, resolution_mgr=resolution_mgr)
+        order_mgr = FakeOrderManager(mode="live")
+        strategy = FakeStrategy()
+        strategy._fired = True
+        strategy._order_placed = True
+
+        with patch("strategy.window_handler.compute_signal_from_snapshot"):
+            handler._process_trade_outcome(
+                strategy, order_mgr, FakeDecayDetector(), last_window_ts=1000
+            )
+
+        kwargs = resolution_mgr.create_pending.call_args.kwargs
+        assert kwargs["maker_usd"] == 0.0
+        assert kwargs["taker_usd"] == pytest.approx(3.12, abs=0.01)
+        assert kwargs["is_maker_entry"] is False
+        expected_fee = round(4.00 * 0.78 * 0.002, 6)
+        assert kwargs["entry_taker_fee"] == pytest.approx(expected_fee, abs=0.0001)
 
 
 # ---------------------------------------------------------------------------

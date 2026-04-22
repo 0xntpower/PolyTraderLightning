@@ -41,7 +41,7 @@ rules_strategy:
   maker_timeout_s: 3.0       # Maker order timeout before taker fallback (0=taker only)
   max_chop_flips: 0          # Skip trade if avg chop flips >= this (0=disabled)
   max_entry_gap_pct: 15.0    # Skip if bid >N% below signal avg_entry (0=disabled)
-  skip_maker_min_oos_wr_pct: 96.0   # Cross spread on fire when oos_wr >= this (0=disabled)
+  skip_maker_min_oos_wr_pct: 95.0   # Cross spread on fire when oos_wr >= this (0=disabled)
   skip_maker_max_stddev_pct: 0.035  # AND-gate: also require stddev <= this (0=no stddev gate)
   # Subsample the variance accumulator to this cadence (seconds) so the bot's
   # live stddev lines up with the engine's historical backtest values. Must
@@ -271,7 +271,7 @@ class RulesStrategyConfig:
     # stddev is low enough), skip the maker quote and cross the spread on
     # fire. Prevents ask walk-away from turning correct predictions into
     # no-fills via TAKER_NO_EDGE_AT_NEW_PRICE. 0 disables either gate.
-    skip_maker_min_oos_wr_pct: float = 96.0
+    skip_maker_min_oos_wr_pct: float = 95.0
     skip_maker_max_stddev_pct: float = 0.035
     # Subsample the live variance accumulator to this cadence (seconds) so the
     # bot's stddev matches the engine's backtest values. Must match

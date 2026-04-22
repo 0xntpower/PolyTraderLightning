@@ -550,11 +550,22 @@ class OrderManager:
         self.risk.tracker.add_exposure(size_usd)
         size = size_usd / price
 
+        # Commit flag + finally block guarantee exposure is rolled back on any
+        # exit path that does not successfully place an order — including an
+        # unanticipated exception escaping the narrow excepts below. Without
+        # this, a TypeError from a py-clob-client constructor mismatch (see
+        # post-mortem 2026-04-22 §5.3) leaks exposure indefinitely.
+        committed = False
         loop = asyncio.get_running_loop()
         try:
-            # FOK orders require MarketOrderArgs + two-step flow per py-clob-client docs
+            # FOK orders require MarketOrderArgs + two-step flow per py-clob-client docs.
+            # ``side=BUY`` is mandatory in py_clob_client.clob_types.MarketOrderArgs;
+            # omitting it raises TypeError at construction (post-mortem 2026-04-22 §5.1).
+            # Every momentum entry is a BUY of the chosen outcome token; SELL exits go
+            # through ``exit_position_early`` using OrderArgs, not this path.
             market_args = MarketOrderArgs(
                 token_id=token_id,
+                side=BUY,
                 amount=size_usd,
                 price=price,
             )
@@ -573,36 +584,41 @@ class OrderManager:
                 timeout=_CLOB_CALL_TIMEOUT_SEC,
             )
         except TimeoutError:
-            self.risk.tracker.remove_exposure(size_usd)
             self._breaker.record_failure()
             log.warning("%s taker order timed out after %.0fs", tier, _CLOB_CALL_TIMEOUT_SEC)
             return None
         except (OSError, ValueError, KeyError, PolyApiException) as exc:
-            self.risk.tracker.remove_exposure(size_usd)
             self._breaker.record_failure()
             log.warning("%s taker order failed: %s", tier, exc)
             return None
+        else:
+            order_id = resp.get("orderID", "")
+            if not order_id:
+                log.warning("%s taker order rejected: %s", tier, resp)
+                return None
 
-        order_id = resp.get("orderID", "")
-        if not order_id:
-            self.risk.tracker.remove_exposure(size_usd)
-            log.warning("%s taker order rejected: %s", tier, resp)
-            return None
-
-        self._breaker.record_success()
-        self.state.active_order_ids.append(order_id)
-        self._order_details[order_id] = {
-            "tier": tier,
-            "price": price,
-            "size_usd": size_usd,
-            "token_id": token_id,
-            "is_maker": False,
-        }
-        self._cached_balance_usd -= size_usd
-        log.info(
-            "%s taker order placed: id=%s price=%.2f size=%.2f", tier, order_id[:12], price, size
-        )
-        return str(order_id)
+            self._breaker.record_success()
+            self.state.active_order_ids.append(order_id)
+            self._order_details[order_id] = {
+                "tier": tier,
+                "price": price,
+                "size_usd": size_usd,
+                "token_id": token_id,
+                "is_maker": False,
+            }
+            self._cached_balance_usd -= size_usd
+            committed = True
+            log.info(
+                "%s taker order placed: id=%s price=%.2f size=%.2f",
+                tier,
+                order_id[:12],
+                price,
+                size,
+            )
+            return str(order_id)
+        finally:
+            if not committed:
+                self.risk.tracker.remove_exposure(size_usd)
 
     async def cancel_all_active(self) -> None:
         """Cancel all unfilled orders for the current window.

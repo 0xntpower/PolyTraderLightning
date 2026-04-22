@@ -707,16 +707,23 @@ class MomentumSignalStrategy:
         time_remaining: float,
         order_mgr: OrderExecutor,
     ) -> None:
-        """Check pending maker order: filled? timed out? deadline passed?"""
+        """Check pending maker order: fully filled, timed out, or deadline?
+
+        Partial-fill handling (post-mortem 2026-04-22 §5.2): a maker order
+        that fills only part of the intended size must cancel the remainder
+        and escalate a taker order for the unfilled quantity, rather than
+        treating the partial as complete and silently forfeiting the rest.
+        """
         sc = self.signal_cfg
 
-        # Check if maker was filled
+        # Fully filled — finalize and done.
         assert self._maker_order_id is not None  # noqa: S101  # set when maker order placed
-        if order_mgr.is_order_filled(self._maker_order_id):
+        if order_mgr.is_order_fully_filled(self._maker_order_id):
+            filled = order_mgr.filled_usd(self._maker_order_id)
             self._finalize_entry(
                 self._maker_order_id,
                 self._maker_entry_price,
-                self._maker_size_usd,
+                filled,
                 "maker",
                 order_mgr,
             )
@@ -725,99 +732,208 @@ class MomentumSignalStrategy:
                 sc.rank,
                 sc.side.value,
                 self._maker_entry_price,
-                self._maker_size_usd,
+                filled,
             )
             return
 
         elapsed = time.time() - self._maker_placed_at
 
-        # Deadline: not enough time left for anything
+        # Deadline: not enough time left for anything. Cancel and book any
+        # partial that did land before close.
         if time_remaining < self.cfg.entry_window_stop:
             await order_mgr.cancel_order(self._maker_order_id)
-            self._entry_complete = True
-            log.info(
-                "MAKER EXPIRED (deadline) rank=%d elapsed=%.1fs",
-                sc.rank,
-                elapsed,
-            )
+            filled_at_deadline = order_mgr.filled_usd(self._maker_order_id)
+            if filled_at_deadline > 0:
+                self._finalize_entry(
+                    self._maker_order_id,
+                    self._maker_entry_price,
+                    filled_at_deadline,
+                    "maker",
+                    order_mgr,
+                )
+                log.info(
+                    "MAKER PARTIAL EXPIRED (deadline) rank=%d side=%s price=%.2f "
+                    "filled=$%.2f of intended=$%.2f elapsed=%.1fs",
+                    sc.rank,
+                    sc.side.value,
+                    self._maker_entry_price,
+                    filled_at_deadline,
+                    self._maker_size_usd,
+                    elapsed,
+                )
+            else:
+                self._entry_complete = True
+                log.info(
+                    "MAKER EXPIRED (deadline) rank=%d elapsed=%.1fs",
+                    sc.rank,
+                    elapsed,
+                )
             return
 
-        # Timeout: escalate to taker
+        # Timeout: escalate to taker.
         if elapsed < self.cfg.maker_timeout_s:
             return  # still waiting
 
-        # Cancel maker order
+        # Snapshot filled portion BEFORE cancel (cancel may race with a
+        # last-moment fill).
+        filled_before_cancel = order_mgr.filled_usd(self._maker_order_id)
         cancelled = await order_mgr.cancel_order(self._maker_order_id)
 
-        # Race condition: might have filled during cancel
-        if not cancelled and order_mgr.is_order_filled(self._maker_order_id):
+        # Race: fully filled in the gap between our check and the cancel.
+        if not cancelled and order_mgr.is_order_fully_filled(self._maker_order_id):
+            filled = order_mgr.filled_usd(self._maker_order_id)
             self._finalize_entry(
                 self._maker_order_id,
                 self._maker_entry_price,
-                self._maker_size_usd,
+                filled,
                 "maker",
                 order_mgr,
             )
             log.info(
-                "MAKER FILLED (during cancel) rank=%d price=%.2f",
+                "MAKER FILLED (during cancel) rank=%d price=%.2f size=$%.2f",
                 sc.rank,
                 self._maker_entry_price,
+                filled,
             )
             return
 
-        # Get current best ask for taker
+        # Re-read filled after cancel — the cancel itself may have raced with
+        # a fill, so use the larger value.
+        filled_usd = max(
+            filled_before_cancel,
+            order_mgr.filled_usd(self._maker_order_id),
+        )
+        remaining_usd = max(0.0, self._maker_size_usd - filled_usd)
+        partial = filled_usd > 0 and remaining_usd > 0
+
+        if partial:
+            log.info(
+                "MAKER PARTIAL rank=%d side=%s price=%.2f filled=$%.2f of "
+                "intended=$%.2f escalating=$%.2f elapsed=%.1fs",
+                sc.rank,
+                sc.side.value,
+                self._maker_entry_price,
+                filled_usd,
+                self._maker_size_usd,
+                remaining_usd,
+                elapsed,
+            )
+
+        # Remainder below the min-bet floor — book the partial (if any) and stop.
+        min_taker_bet = self.sizing_cfg.kelly_min_bet if self.sizing_cfg is not None else 1.0
+        if remaining_usd < min_taker_bet:
+            if filled_usd > 0:
+                self._finalize_entry(
+                    self._maker_order_id,
+                    self._maker_entry_price,
+                    filled_usd,
+                    "maker",
+                    order_mgr,
+                )
+            else:
+                self._entry_complete = True
+            return
+
+        # Get current best ask for the taker leg.
         best_ask = self.state.best_ask_up if sc.side == Direction.UP else self.state.best_ask_down
         if best_ask <= 0:
-            self._entry_complete = True
+            if filled_usd > 0:
+                self._finalize_entry(
+                    self._maker_order_id,
+                    self._maker_entry_price,
+                    filled_usd,
+                    "maker",
+                    order_mgr,
+                )
+            else:
+                self._entry_complete = True
             log.warning(
                 "TAKER SKIP (no ask) rank=%d after maker timeout",
                 sc.rank,
             )
             return
 
-        # Re-check Kelly edge at taker price (ask may have moved)
+        # Re-check Kelly edge at the current taker price — the ask may have
+        # walked while we were resting the maker.
         if self.kelly_wr_result is not None and best_ask < 1.0:
             p = self.kelly_wr_result.adjusted_p
             b = (1.0 - best_ask) / best_ask
             raw_f = p - (1.0 - p) / b
             if raw_f <= 0:
-                self._entry_complete = True
+                if filled_usd > 0:
+                    self._finalize_entry(
+                        self._maker_order_id,
+                        self._maker_entry_price,
+                        filled_usd,
+                        "maker",
+                        order_mgr,
+                    )
+                else:
+                    self._entry_complete = True
                 log.info(
                     "[SKIP] rank=%d reason=TAKER_NO_EDGE_AT_NEW_PRICE "
-                    "ask=%.2f p=%.3f raw_f=%.3f maker_was=%.2f",
+                    "ask=%.2f p=%.3f raw_f=%.3f maker_was=%.2f filled=$%.2f",
                     sc.rank,
                     best_ask,
                     p,
                     raw_f,
                     self._maker_entry_price,
+                    filled_usd,
                 )
                 return
 
-        # Place taker at current best ask
+        # Place taker for the unfilled remainder only.
         taker_id = await order_mgr.place_taker_order(
             token_id=self._maker_token_id,
             price=best_ask,
-            size_usd=self._maker_size_usd,
+            size_usd=remaining_usd,
             tier=self._maker_tier,
         )
 
         if taker_id is not None:
+            # Combined finalization: maker partial + taker remainder become a
+            # single volume-weighted entry for downstream window accounting.
+            total_usd = filled_usd + remaining_usd
+            if filled_usd > 0:
+                weighted_price = (
+                    filled_usd * self._maker_entry_price + remaining_usd * best_ask
+                ) / total_usd
+                entry_type = "maker+taker"
+            else:
+                weighted_price = best_ask
+                entry_type = "taker"
             self._finalize_entry(
                 taker_id,
-                best_ask,
-                self._maker_size_usd,
-                "taker",
+                weighted_price,
+                total_usd,
+                entry_type,
                 order_mgr,
             )
             log.info(
-                "TAKER ESCALATION rank=%d side=%s "
-                "maker_price=%.2f taker_price=%.2f elapsed=%.1fs size=$%.2f",
+                "TAKER ESCALATION rank=%d side=%s maker_price=%.2f "
+                "taker_price=%.2f elapsed=%.1fs maker_filled=$%.2f "
+                "taker_size=$%.2f total=$%.2f",
                 sc.rank,
                 sc.side.value,
                 self._maker_entry_price,
                 best_ask,
                 elapsed,
-                self._maker_size_usd,
+                filled_usd,
+                remaining_usd,
+                total_usd,
+            )
+        elif filled_usd > 0:
+            self._finalize_entry(
+                self._maker_order_id,
+                self._maker_entry_price,
+                filled_usd,
+                "maker",
+                order_mgr,
+            )
+            log.warning(
+                "TAKER FAILED rank=%d booking maker partial $%.2f only",
+                sc.rank,
+                filled_usd,
             )
         else:
             self._entry_complete = True

@@ -38,6 +38,11 @@ class FakeOrderExecutor:
         self.next_order_id: str | None = "fake-order-1"
         self.filled_orders: set[str] = set()
         self.cancelled_orders: set[str] = set()
+        # Per-order recorded filled_usd for partial-fill tests. When an
+        # order_id is in ``filled_orders`` but absent here, the fake reports
+        # the full intended size (set by ``set_partial_fill`` per test).
+        self.partial_fills_usd: dict[str, float] = {}
+        self.order_intent_usd: dict[str, float] = {}
         self._rule_triggered: tuple[int, str, object] | None = None
         self._rule_obi_threshold: float = 0.0
         self._rule_obi_depth: str = "none"
@@ -51,6 +56,8 @@ class FakeOrderExecutor:
         tier: str,
     ) -> str | None:
         self.calls.append(OrderCall("place_maker_order", token_id, price, size_usd, tier))
+        if self.next_order_id is not None:
+            self.order_intent_usd[self.next_order_id] = size_usd
         return self.next_order_id
 
     async def place_taker_order(
@@ -61,6 +68,8 @@ class FakeOrderExecutor:
         tier: str,
     ) -> str | None:
         self.calls.append(OrderCall("place_taker_order", token_id, price, size_usd, tier))
+        if self.next_order_id is not None:
+            self.order_intent_usd[self.next_order_id] = size_usd
         return self.next_order_id
 
     async def cancel_order(self, order_id: str) -> bool:
@@ -70,8 +79,19 @@ class FakeOrderExecutor:
     async def cancel_all_active(self) -> None:
         pass
 
-    def is_order_filled(self, order_id: str) -> bool:
-        return order_id in self.filled_orders
+    def filled_usd(self, order_id: str) -> float:
+        if order_id in self.partial_fills_usd:
+            return self.partial_fills_usd[order_id]
+        if order_id in self.filled_orders:
+            return self.order_intent_usd.get(order_id, 0.0)
+        return 0.0
+
+    def is_order_fully_filled(self, order_id: str) -> bool:
+        return order_id in self.filled_orders and order_id not in self.partial_fills_usd
+
+    def set_partial_fill(self, order_id: str, filled_usd: float) -> None:
+        """Test helper: mark order as partially filled for ``filled_usd``."""
+        self.partial_fills_usd[order_id] = filled_usd
 
     def set_rule_triggered(
         self,

@@ -49,6 +49,12 @@ _CLOB_CALL_TIMEOUT_SEC = 10.0
 # default executor that aiohttp / other run_in_executor consumers share.
 _CLOB_EXECUTOR_WORKERS = 8
 
+# USD tolerance for "fully filled" comparison. Covers float rounding on
+# ``price * size`` when Polymarket returns exact cent prices against share
+# quantities. Anything larger is a real partial — see post-mortem 2026-04-22
+# §5.2 and ``is_order_fully_filled``.
+_FILL_TOLERANCE_USD = 0.01
+
 
 def _parse_fak_filled_shares(resp: dict[str, Any]) -> float:
     """Extract filled share count from a CLOB post_order FAK response.
@@ -367,18 +373,54 @@ class OrderManager:
             log.warning("failed to refresh on-chain balance: %s", exc)
             return self._cached_balance_usd
 
-    def is_order_filled(self, order_id: str) -> bool:
-        """Check if an order was filled via the CLOB user WebSocket."""
-        return order_id in self.state.live_fills
+    def filled_usd(self, order_id: str) -> float:
+        """Cumulative USD filled for this order, aggregated by ``clob_user_ws``.
+
+        Reads ``state.live_fills[order_id].size_usd``, which the user-WS
+        handler accumulates across trade events on the order. Returns 0.0 if
+        no fill events have been seen. See ``clob_user_ws._handle_trade`` —
+        per-order aggregation is correct for the single-trade-per-order case
+        observed in production; the multi-trade-per-order edge (a resting
+        maker nibbled by multiple distinct counterparty takers) would need
+        an additional aggregation pass there.
+        """
+        fill = self.state.live_fills.get(order_id)
+        return fill.size_usd if fill is not None else 0.0
+
+    def is_order_fully_filled(self, order_id: str) -> bool:
+        """True when cumulative fills cover intended size (within 1¢ rounding).
+
+        Compares ``filled_usd`` against ``_order_details[order_id]["size_usd"]``
+        (the intended amount recorded at place time). The 1¢ tolerance covers
+        float rounding on ``price * size``; anything larger is a real partial
+        and should trigger a maker-to-taker escalation via the caller.
+
+        If the order_id is unknown (never placed through this manager), falls
+        back to the boolean "any fill seen" semantic so external CLOB orders
+        don't silently mis-classify.
+        """
+        fill = self.state.live_fills.get(order_id)
+        if fill is None:
+            return False
+        intent = self._order_details.get(order_id)
+        if intent is None:
+            # Unknown intent — can't compare; preserve the old binary semantic.
+            return True
+        intended_usd = float(intent["size_usd"])
+        return fill.size_usd >= intended_usd - _FILL_TOLERANCE_USD
 
     async def cancel_order(self, order_id: str) -> bool:
         """Cancel a single order by ID.
 
-        Returns True if cancelled, False if already filled or failed.
+        Returns True if cancel was issued, False if already fully filled or
+        the CLOB call failed. Partial fills are NOT treated as "already
+        filled" — cancel is issued so the remainder can be released, and
+        exposure/balance are refunded only for the unfilled portion (the
+        filled portion is locked in on-chain until resolve).
         """
         assert self.risk.tracker is not None  # noqa: S101  # set in RiskRegistry.from_config()
-        if order_id in self.state.live_fills:
-            return False  # already filled
+        if self.is_order_fully_filled(order_id):
+            return False  # already fully filled
 
         loop = asyncio.get_running_loop()
         try:
@@ -396,13 +438,19 @@ class OrderManager:
             self.state.maker_order_ids.discard(order_id)
             detail = self._order_details.pop(order_id, None)
             if detail:
-                self.risk.tracker.remove_exposure(detail["size_usd"])
-                # Refund reserved balance: place_maker/place_taker deducted
-                # size_usd from _cached_balance_usd at order time. Without this
-                # refund, maker→taker escalation within a window can falsely
-                # trip the balance gate before the next on-chain refresh.
+                # Refund only the unfilled portion: any partial fill is
+                # locked in on-chain and settles at resolve time, so its
+                # exposure must remain booked until then.
+                intended = float(detail["size_usd"])
+                already_filled = self.filled_usd(order_id)
+                unfilled = max(0.0, intended - already_filled)
+                self.risk.tracker.remove_exposure(unfilled)
+                # Refund the matching portion of the cached balance so a
+                # maker→taker escalation within the same window does not
+                # falsely trip the balance gate before the next on-chain
+                # refresh.
                 if self._cached_balance_usd is not None:
-                    self._cached_balance_usd += detail["size_usd"]
+                    self._cached_balance_usd += unfilled
             log.info("cancelled order %s", order_id[:12])
             return True
         except TimeoutError:

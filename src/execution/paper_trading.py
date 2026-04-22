@@ -165,8 +165,21 @@ class PaperOrderManager:
         rec.sprt_factor = sprt_factor
         rec.final_bet_size = final_bet_size
 
-    def is_order_filled(self, order_id: str) -> bool:
-        """Check if a paper order has been filled."""
+    def filled_usd(self, order_id: str) -> float:
+        """Cumulative USD filled for this paper order.
+
+        Paper mode does not model partial fills — ``PaperOrder.filled`` is
+        binary, so this returns either the order's full ``size_usd`` or 0.
+        Mirrors the live-side API so the strategy can treat both executors
+        uniformly.
+        """
+        for o in self._orders:
+            if o.order_id == order_id and o.filled:
+                return o.size_usd
+        return 0.0
+
+    def is_order_fully_filled(self, order_id: str) -> bool:
+        """Check if a paper order has been filled. Paper has no partial state."""
         return any(o.order_id == order_id and o.filled for o in self._orders)
 
     async def cancel_order(self, order_id: str) -> bool:

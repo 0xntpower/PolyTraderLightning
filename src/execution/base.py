@@ -69,7 +69,20 @@ class OrderExecutor(Protocol):
 
     async def cancel_all_active(self) -> None: ...
 
-    def is_order_filled(self, order_id: str) -> bool: ...
+    def filled_usd(self, order_id: str) -> float:
+        """Cumulative USD filled against this order so far. 0.0 if unknown."""
+        ...
+
+    def is_order_fully_filled(self, order_id: str) -> bool:
+        """True when cumulative fills cover the intended size (within tolerance).
+
+        Replaces the older "any fill -> True" semantic, which silently accepted
+        partial fills as complete (post-mortem 2026-04-22 §5.2) — at live-CLOB
+        book depths the maker intent frequently matches only 5-20 % of size,
+        and the strategy needs to distinguish "done" from "partial so escalate
+        the remainder".
+        """
+        ...
 
     def set_rule_triggered(
         self,

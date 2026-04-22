@@ -14,6 +14,7 @@ book the partial, escalate a taker for the unfilled quantity).
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import patch
 
 import pytest
 
@@ -304,3 +305,147 @@ async def test_partial_escalation_emits_maker_partial_log(caplog) -> None:
     assert len(partial_lines) == 1
     assert f"filled=${partial_usd:.2f}" in partial_lines[0]
     assert f"intended=${maker_intent:.2f}" in partial_lines[0]
+
+
+# ---------------------------------------------------------------------------
+# Discord notification — combined maker+taker entry carries the capital split
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_partial_escalation_sends_discord_split() -> None:
+    """The Discord bet-placed payload for a combined entry must include
+    ``maker_usd`` and ``taker_usd`` so the embed can render the percent split.
+    """
+    strategy, executor = _build_maker_strategy(maker_timeout_s=0.001)
+    await _fire_maker(strategy, executor)
+
+    maker_id = strategy._maker_order_id
+    assert maker_id is not None
+    maker_intent = strategy._maker_size_usd
+    partial_usd = maker_intent * 0.30
+    executor.set_partial_fill(maker_id, partial_usd)
+
+    with patch("strategy.momentum_signal.send_bet_placed") as mock_send:
+        await asyncio.sleep(0.01)
+        await strategy.evaluate(_make_signal(), 150.0, executor)
+
+    # send_bet_placed was called once with both maker_usd and taker_usd > 0.
+    assert mock_send.call_count == 1
+    kwargs = mock_send.call_args.kwargs
+    assert kwargs["entry_type"] == "maker+taker"
+    expected_remainder = maker_intent - partial_usd
+    assert kwargs["maker_usd"] == pytest.approx(partial_usd, abs=0.01)
+    assert kwargs["taker_usd"] == pytest.approx(expected_remainder, abs=0.01)
+
+
+@pytest.mark.asyncio
+async def test_pure_maker_fill_sends_zero_split() -> None:
+    """Pure maker fills must NOT include a split — the single-label form
+    ("Maker Fill") is the correct presentation for uncombined entries.
+    """
+    strategy, executor = _build_maker_strategy()
+    await _fire_maker(strategy, executor)
+
+    maker_id = strategy._maker_order_id
+    assert maker_id is not None
+    executor.filled_orders.add(maker_id)
+
+    with patch("strategy.momentum_signal.send_bet_placed") as mock_send:
+        await strategy.evaluate(_make_signal(), 150.0, executor)
+
+    assert mock_send.call_count == 1
+    kwargs = mock_send.call_args.kwargs
+    assert kwargs["entry_type"] == "maker"
+    # Split params default to 0 on non-combined paths.
+    assert kwargs["maker_usd"] == 0.0
+    assert kwargs["taker_usd"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_pure_taker_escalation_sends_zero_split() -> None:
+    """Zero-fill maker → full-size taker escalation is a pure taker entry,
+    not a combined one — no split to render.
+    """
+    strategy, executor = _build_maker_strategy(maker_timeout_s=0.001)
+    await _fire_maker(strategy, executor)
+
+    with patch("strategy.momentum_signal.send_bet_placed") as mock_send:
+        await asyncio.sleep(0.01)
+        await strategy.evaluate(_make_signal(), 150.0, executor)
+
+    assert mock_send.call_count == 1
+    kwargs = mock_send.call_args.kwargs
+    assert kwargs["entry_type"] == "taker"
+    assert kwargs["maker_usd"] == 0.0
+    assert kwargs["taker_usd"] == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Discord embed rendering — Entry field formatting
+# ---------------------------------------------------------------------------
+
+
+def _extract_entry_field(embeds: list[dict]) -> str:
+    """Pull the "Entry" field value out of a bet-placed embed payload."""
+    for e in embeds:
+        for f in e.get("fields", []):
+            if f.get("name") == "Entry":
+                return str(f.get("value", ""))
+    return ""
+
+
+def test_discord_entry_field_renders_split_for_combined_entry() -> None:
+    """Combined maker+taker entry renders a percent split."""
+    from shared.discord import send_bet_placed
+
+    with patch("shared.discord._send", return_value=True) as mock_send:
+        send_bet_placed(
+            mode="live",
+            side="down",
+            price=0.78,
+            size_usd=3.12,
+            rank=1,
+            entry_type="maker+taker",
+            maker_usd=0.17,
+            taker_usd=2.95,
+        )
+
+    assert mock_send.call_count == 1
+    embeds = mock_send.call_args.args[1]
+    # 0.17 / 3.12 = 5.4 %, 2.95 / 3.12 = 94.6 % → rounded "5%" / "95%".
+    assert _extract_entry_field(embeds) == "`Maker 5% / Taker 95%`"
+
+
+def test_discord_entry_field_single_label_for_pure_maker() -> None:
+    from shared.discord import send_bet_placed
+
+    with patch("shared.discord._send", return_value=True) as mock_send:
+        send_bet_placed(
+            mode="live",
+            side="up",
+            price=0.85,
+            size_usd=3.12,
+            rank=1,
+            entry_type="maker",
+        )
+
+    embeds = mock_send.call_args.args[1]
+    assert _extract_entry_field(embeds) == "`Maker Fill`"
+
+
+def test_discord_entry_field_single_label_for_pure_taker() -> None:
+    from shared.discord import send_bet_placed
+
+    with patch("shared.discord._send", return_value=True) as mock_send:
+        send_bet_placed(
+            mode="live",
+            side="up",
+            price=0.85,
+            size_usd=3.12,
+            rank=1,
+            entry_type="taker",
+        )
+
+    embeds = mock_send.call_args.args[1]
+    assert _extract_entry_field(embeds) == "`Taker`"

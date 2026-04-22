@@ -654,8 +654,17 @@ class MomentumSignalStrategy:
         size_usd: float,
         entry_type: str,
         order_mgr: OrderExecutor,
+        *,
+        maker_usd: float = 0.0,
+        taker_usd: float = 0.0,
     ) -> None:
-        """Common finalization after a fill is confirmed (maker or taker)."""
+        """Common finalization after a fill is confirmed (maker or taker).
+
+        ``maker_usd`` / ``taker_usd`` default to 0.0 for the pure-maker and
+        pure-taker paths — their entry_type label carries the full story.
+        The partial-fill escalation branch passes both values so Discord can
+        render the capital split (post-mortem 2026-04-22 §5.2).
+        """
         sc = self.signal_cfg
         self._entry_complete = True
         self._order_placed = True
@@ -697,6 +706,8 @@ class MomentumSignalStrategy:
             rank=sc.rank,
             order_id=order_id,
             entry_type=entry_type,
+            maker_usd=maker_usd,
+            taker_usd=taker_usd,
             obi_threshold=sc.obi_threshold,
             obi_depth=sc.obi_depth.value,
             obi_observed=self._latest_obi,
@@ -899,16 +910,24 @@ class MomentumSignalStrategy:
                     filled_usd * self._maker_entry_price + remaining_usd * best_ask
                 ) / total_usd
                 entry_type = "maker+taker"
+                self._finalize_entry(
+                    taker_id,
+                    weighted_price,
+                    total_usd,
+                    entry_type,
+                    order_mgr,
+                    maker_usd=filled_usd,
+                    taker_usd=remaining_usd,
+                )
             else:
-                weighted_price = best_ask
-                entry_type = "taker"
-            self._finalize_entry(
-                taker_id,
-                weighted_price,
-                total_usd,
-                entry_type,
-                order_mgr,
-            )
+                # Pure taker escalation (zero maker fill) — no split to render.
+                self._finalize_entry(
+                    taker_id,
+                    best_ask,
+                    total_usd,
+                    "taker",
+                    order_mgr,
+                )
             log.info(
                 "TAKER ESCALATION rank=%d side=%s maker_price=%.2f "
                 "taker_price=%.2f elapsed=%.1fs maker_filled=$%.2f "

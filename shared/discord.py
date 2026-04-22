@@ -249,15 +249,35 @@ def send_bet_placed(
     rank: int,
     order_id: str = "",
     entry_type: str = "taker",
+    maker_usd: float = 0.0,
+    taker_usd: float = 0.0,
     obi_threshold: float | None = None,
     obi_depth: str | None = None,
     obi_observed: float | None = None,
 ) -> bool:
-    """Notify that a bet was submitted."""
+    """Notify that a bet was submitted.
+
+    When both ``maker_usd`` and ``taker_usd`` are positive, the entry is a
+    maker-partial + taker-remainder combo (post-mortem 2026-04-22 §5.2); the
+    "Entry" field shows the capital split as percentages so operators can
+    see at a glance whether the maker captured most of the position or the
+    taker escalation did. For pure maker or pure taker fills the existing
+    single-label form ("Maker Fill" / "Taker") is preserved.
+    """
     is_paper = mode == "paper"
     url = _url("DISCORD_WEBHOOK_PAPER_BETS" if is_paper else "DISCORD_WEBHOOK_LIVE_BETS")
     tag = "PAPER" if is_paper else "LIVE"
-    entry_label = "Maker Fill" if entry_type == "maker" else "Taker"
+
+    entry_label: str
+    if maker_usd > 0.0 and taker_usd > 0.0:
+        total = maker_usd + taker_usd
+        maker_pct = 100.0 * maker_usd / total
+        taker_pct = 100.0 * taker_usd / total
+        entry_label = f"Maker {maker_pct:.0f}% / Taker {taker_pct:.0f}%"
+    elif entry_type == "maker":
+        entry_label = "Maker Fill"
+    else:
+        entry_label = "Taker"
 
     fields = [
         _field("Side", f"`{side.upper()}`"),

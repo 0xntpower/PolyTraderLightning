@@ -295,6 +295,15 @@ def validate_momentum_signal(
             )
             post_fire_max_safe_erosion_pct = None
 
+    # v3.7: orchestrator-tracked family age and aggregate lifetime p80.
+    # All three fields are optional and may be None (bootstrap phase,
+    # disabled tracker, older orchestrator). Accept missing / null /
+    # non-numeric gracefully — there is nothing the bot does with these
+    # values except surface them on Discord.
+    signal_age_h = _optional_float_field(data.get("signalAgeH"))
+    est_max_lifetime_h = _optional_float_field(data.get("estMaxLifetimeH"))
+    lifetime_samples = _optional_int_field(data.get("lifetimeSamples"))
+
     cfg = MomentumSignalConfig(
         rank=rank,
         side=side,
@@ -316,6 +325,9 @@ def validate_momentum_signal(
         post_fire_max_safe_erosion_pct=post_fire_max_safe_erosion_pct,
         obi_threshold=obi_threshold,
         obi_depth=obi_depth,
+        signal_age_h=signal_age_h,
+        est_max_lifetime_h=est_max_lifetime_h,
+        lifetime_samples=lifetime_samples,
     )
 
     # --- Completeness check: every field the engine produces must arrive ---
@@ -347,3 +359,34 @@ def _finite_float(field: str, value: object) -> float:
     if math.isnan(f) or math.isinf(f):
         raise SignalValidationError(field, "must be a finite number")
     return f
+
+
+def _optional_float_field(value: object) -> float | None:
+    """Lenient float parser for v3.7 lifetime fields.
+
+    Accepts missing (None), null JSON, or any non-numeric input by
+    returning None rather than raising — these fields are observational
+    and the bot must never reject a delivery because the orchestrator
+    couldn't compute them.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    f = float(value)
+    if math.isnan(f) or math.isinf(f):
+        return None
+    return f
+
+
+def _optional_int_field(value: object) -> int | None:
+    """Lenient int parser for v3.7 lifetime_samples."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return int(value)
+    return None

@@ -2,8 +2,40 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from typing import Any
+
+
+def _optional_float(raw: object) -> float | None:
+    """Parse a JSON value as a non-NaN finite float, or return None.
+
+    The IPC payload may carry explicit nulls for fields the orchestrator
+    couldn't compute (bootstrap phase, tracker failure, older orchestrator
+    version pre-v3.7). Treat missing / None / non-numeric as None rather
+    than silently coercing to 0.0 — downstream code branches on None to
+    distinguish "unknown" from "zero".
+    """
+    if raw is None or isinstance(raw, bool):
+        return None
+    if not isinstance(raw, (int, float)):
+        return None
+    f = float(raw)
+    if not math.isfinite(f):
+        return None
+    return f
+
+
+def _optional_int(raw: object) -> int | None:
+    if raw is None or isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float):
+        if not math.isfinite(raw):
+            return None
+        return int(raw)
+    return None
 
 
 @dataclass
@@ -48,6 +80,13 @@ class SignalConfig:
     # apply the same gate the engine trained on.
     obi_threshold: float = 0.0
     obi_depth: str = "none"
+    # v3.7: signal-family lifetime tracking. Populated by the orchestrator
+    # from LifetimeTracker state; passed through for bot Discord surfacing.
+    # None during bootstrap phase (orchestrator has < 30 samples) or when
+    # the orchestrator's tracker failed this cycle.
+    signal_age_h: float | None = None
+    est_max_lifetime_h: float | None = None
+    lifetime_samples: int | None = None
 
     @classmethod
     def from_engine_json(cls, data: dict[str, Any]) -> SignalConfig:
@@ -80,6 +119,9 @@ class SignalConfig:
             avg_entry_price=data.get("avgEntryPrice", 0.0),
             ev_per_trade=data.get("evPerTrade", 0.0),
             composite_score=data.get("compositeScore", 0.0),
+            signal_age_h=_optional_float(data.get("signalAgeH")),
+            est_max_lifetime_h=_optional_float(data.get("estMaxLifetimeH")),
+            lifetime_samples=_optional_int(data.get("lifetimeSamples")),
             **cls._parse_post_fire(data),
         )
 
@@ -140,6 +182,9 @@ class SignalConfig:
                 "winSamples": self.post_fire_win_samples,
                 "lossSamples": self.post_fire_loss_samples,
             },
+            "signalAgeH": self.signal_age_h,
+            "estMaxLifetimeH": self.est_max_lifetime_h,
+            "lifetimeSamples": self.lifetime_samples,
         }
 
     @property

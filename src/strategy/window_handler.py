@@ -884,6 +884,9 @@ class WindowEventHandler:
             total_folds=new_sc.wf_total_test_folds,
             obi_threshold=new_sc.obi_threshold,
             obi_depth=new_sc.obi_depth.value,
+            signal_age_h=new_sc.signal_age_h,
+            est_max_lifetime_h=new_sc.est_max_lifetime_h,
+            lifetime_samples=new_sc.lifetime_samples,
         )
 
         if same_signal:

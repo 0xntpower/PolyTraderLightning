@@ -60,6 +60,14 @@ class MomentumSignalConfig:
     # Depth level the engine trained the OBI gate at (D10 or D20). NONE
     # whenever ``obi_threshold == 0.0`` — depth is meaningless with no gate.
     obi_depth: ObiDepth = ObiDepth.NONE
+    # v3.7: orchestrator-tracked family age (hours) at delivery time and
+    # the orchestrator's current p80 estimate of family lifetime. None
+    # during bootstrap or when the orchestrator tracker is disabled /
+    # failed. Observational only in phase 1 — surfaces on Discord
+    # embeds so operators can eyeball age-vs-outcome correlation.
+    signal_age_h: float | None = None
+    est_max_lifetime_h: float | None = None
+    lifetime_samples: int | None = None
 
     def __post_init__(self) -> None:
         if self.observe_from_s <= self.observe_to_s:

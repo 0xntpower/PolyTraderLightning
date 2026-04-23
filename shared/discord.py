@@ -322,6 +322,9 @@ def send_bet_result(
     market_outcome: str | None = None,
     maker_usd: float = 0.0,
     taker_usd: float = 0.0,
+    signal_age_at_fire_h: float | None = None,
+    est_max_lifetime_h: float | None = None,
+    lifetime_samples: int | None = None,
     obi_threshold: float | None = None,
     obi_depth: str | None = None,
 ) -> bool:
@@ -354,6 +357,16 @@ def send_bet_result(
         maker_pct = 100.0 * maker_usd / total
         taker_pct = 100.0 * taker_usd / total
         fields.append(_field("Fill", f"`Maker {maker_pct:.0f}% / Taker {taker_pct:.0f}%`"))
+    if signal_age_at_fire_h is not None:
+        fields.append(_field("Signal Age at Fire", f"`{signal_age_at_fire_h:.1f}h`"))
+    if est_max_lifetime_h is not None:
+        n_suffix = f", n={lifetime_samples}" if lifetime_samples is not None else ""
+        fields.append(
+            _field(
+                "Est. Max Lifetime",
+                f"`{est_max_lifetime_h:.1f}h (p80{n_suffix})`",
+            )
+        )
     if market_outcome:
         fields.append(_field("Market", f"`{market_outcome.upper()}`"))
     if obi_threshold is not None:
@@ -500,8 +513,18 @@ def send_signal_updated(
     _fold_indices: list[int] | None = None,
     obi_threshold: float | None = None,
     obi_depth: str | None = None,
+    signal_age_h: float | None = None,
+    est_max_lifetime_h: float | None = None,
+    lifetime_samples: int | None = None,
 ) -> bool:
-    """Notify that the bot switched to a new active signal."""
+    """Notify that the bot switched to a new active signal.
+
+    ``signal_age_h`` is the orchestrator-tracked age of this signal's family
+    at the moment of delivery. ``est_max_lifetime_h`` is the current p80 of
+    the aggregate family-lifetime distribution (None during bootstrap).
+    Both surface so operators can sanity-check whether a delivered signal
+    is fresh or aging.
+    """
     url = _url("DISCORD_WEBHOOK_SIGNAL_UPDATED")
 
     fields = [
@@ -523,6 +546,16 @@ def send_signal_updated(
             fields.append(_field("OBI Gate", f"`{obi_threshold:.2f}@{obi_depth}`"))
         else:
             fields.append(_field("OBI Gate", "`off`"))
+    if signal_age_h is not None:
+        fields.append(_field("Signal Age", f"`{signal_age_h:.1f}h`"))
+    if est_max_lifetime_h is not None:
+        n_suffix = f", n={lifetime_samples}" if lifetime_samples is not None else ""
+        fields.append(
+            _field(
+                "Est. Max Lifetime",
+                f"`{est_max_lifetime_h:.1f}h (p80{n_suffix})`",
+            )
+        )
 
     return _send(
         url,

@@ -1243,7 +1243,7 @@ async def run(signal_path_override: str | None = None, standalone: bool = False)
     if not _preflight(cfg, paths, signal_path_override, standalone):
         sys.exit(1)
 
-    setup_logging(cfg.mode.log_level, str(paths.logs), cfg.mode.log_retention_days)
+    setup_logging(cfg.mode.log_level, str(paths.logs))
 
     log.info("starting polymarket bot — mode=%s", cfg.mode.trading)
     log.info(

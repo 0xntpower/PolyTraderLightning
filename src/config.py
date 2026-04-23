@@ -28,7 +28,6 @@ mode:
   trading: "paper"         # "paper" or "live"
   log_level: "INFO"        # DEBUG, INFO, WARNING, ERROR
   log_dir: "data/logs"     # directory for log files
-  log_retention_days: 7    # delete log files older than this many days
 
 # ---------------------------------------------------------------------------
 # Strategy - signal execution and entry filters
@@ -255,7 +254,6 @@ class ModeConfig:
     trading: str = "paper"
     log_level: str = "INFO"
     log_dir: str = "data/logs"
-    log_retention_days: int = 7
 
 
 @dataclass(frozen=True, slots=True)

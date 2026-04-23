@@ -8,8 +8,54 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from datetime import UTC, datetime
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+
+# Keep the last N sessions' logs in logs/log_archive/ as a local safety net;
+# older entries get hard-deleted on the next startup.
+_ARCHIVE_SUBDIR = "log_archive"
+_ARCHIVE_CAP = 30
+
+
+def _archive_previous_log(log_dir: Path, component_name: str) -> None:
+    """Move the previous session's {component_name}.log (and any rotation
+    backups) into log_dir/log_archive/, then prune the archive to the most
+    recent _ARCHIVE_CAP files.
+
+    Called before the new file handler opens so the current session starts
+    with a fresh log file.
+    """
+    archive_dir = log_dir / _ARCHIVE_SUBDIR
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    for src in sorted(log_dir.glob(f"{component_name}.log*")):
+        if not src.is_file():
+            continue
+        mtime = datetime.fromtimestamp(src.stat().st_mtime, tz=UTC)
+        stamp = mtime.strftime("%Y-%m-%d_%H-%M-%S")
+        dest = archive_dir / f"{component_name}_{stamp}.log"
+        counter = 1
+        while dest.exists():
+            dest = archive_dir / f"{component_name}_{stamp}_{counter}.log"
+            counter += 1
+        try:
+            src.rename(dest)
+        except OSError as exc:
+            # Root logger not configured yet — fall back to stderr
+            print(f"warning: failed to archive {src.name}: {exc}", file=sys.stderr)
+
+    archives = sorted(
+        archive_dir.glob(f"{component_name}_*.log"),
+        key=lambda p: p.stat().st_mtime,
+    )
+    excess = len(archives) - _ARCHIVE_CAP
+    for old in archives[: max(0, excess)]:
+        try:
+            old.unlink()
+        except OSError as exc:
+            print(f"warning: failed to prune archive {old.name}: {exc}", file=sys.stderr)
+
 
 RESET = "\033[0m"
 BOLD = "\033[1m"
@@ -78,6 +124,8 @@ def setup_logging(
     log_level = getattr(logging, level.upper(), logging.INFO)
     log_path = Path(log_dir)
     log_path.mkdir(parents=True, exist_ok=True)
+
+    _archive_previous_log(log_path, component_name)
 
     datefmt = "%H:%M:%S"
     file_fmt = "%(asctime)s.%(msecs)03d [%(levelname)-8s] %(name)s: %(message)s"

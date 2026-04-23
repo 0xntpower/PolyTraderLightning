@@ -5,8 +5,13 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
+
+# Keep the last N sessions' logs in logs/log_archive/ as a local safety net;
+# older entries get hard-deleted on the next startup.
+_ARCHIVE_SUBDIR = "log_archive"
+_ARCHIVE_CAP = 30
 
 # ANSI color codes
 RESET = "\033[0m"
@@ -114,39 +119,61 @@ def _enable_windows_ansi() -> None:
         os.system("")  # noqa: S605, S607  # empty command enables Windows VT100 ANSI escape codes
 
 
-def _purge_old_logs(log_dir: Path, retention_days: int) -> None:
-    """Delete log files older than retention_days based on the timestamp in the filename."""
-    cutoff = datetime.now(UTC) - timedelta(days=retention_days)
-    deleted = 0
-    for f in log_dir.glob("*.log"):
-        # Expected filename format: YYYY-MM-DD_HH-MM-SS.log
+def _archive_previous_logs(log_dir: Path) -> tuple[int, int]:
+    """Move prior session logs into log_dir/log_archive/ and prune the
+    archive down to the most recent _ARCHIVE_CAP files.
+
+    Matches the YYYY-MM-DD_HH-MM-SS.log filename scheme so we don't sweep
+    unrelated .log files that may live in the dir. Called before handlers
+    are installed — errors go to stderr. Returns (moved, pruned) so the
+    caller can report counts into the new session log.
+    """
+    archive_dir = log_dir / _ARCHIVE_SUBDIR
+    archive_dir.mkdir(parents=True, exist_ok=True)
+
+    moved = 0
+    for src in log_dir.glob("*.log"):
+        if not src.is_file():
+            continue
         try:
-            ts = datetime.strptime(f.stem, "%Y-%m-%d_%H-%M-%S").replace(tzinfo=UTC)
+            datetime.strptime(src.stem, "%Y-%m-%d_%H-%M-%S")
         except ValueError:
-            continue  # skip files not matching our naming scheme
-        if ts < cutoff:
-            try:
-                f.unlink()
-                deleted += 1
-            except OSError as exc:
-                logging.getLogger(__name__).debug("failed to purge log %s: %s", f.name, exc)
-    if deleted:
-        logging.getLogger(__name__).info(
-            "purged %d log file(s) older than %d days", deleted, retention_days
-        )
+            continue
+        dest = archive_dir / src.name
+        counter = 1
+        while dest.exists():
+            dest = archive_dir / f"{src.stem}_{counter}.log"
+            counter += 1
+        try:
+            src.rename(dest)
+            moved += 1
+        except OSError as exc:
+            print(f"warning: failed to archive {src.name}: {exc}", file=sys.stderr)
+
+    archives = sorted(archive_dir.glob("*.log"), key=lambda p: p.stat().st_mtime)
+    pruned = 0
+    excess = len(archives) - _ARCHIVE_CAP
+    for old in archives[: max(0, excess)]:
+        try:
+            old.unlink()
+            pruned += 1
+        except OSError as exc:
+            print(f"warning: failed to prune archive {old.name}: {exc}", file=sys.stderr)
+
+    return moved, pruned
 
 
 def setup_logging(
     level: str = "INFO",
     log_dir: str = "logs",
-    log_retention_days: int = 7,
 ) -> None:
     """Configure root logger.
 
     Console handler: colored output to stdout.
     File handler:    plain text (no ANSI) in logs/YYYY-MM-DD_HH-MM-SS.log.
-                     A new file is created on every run.
-                     Files older than log_retention_days are deleted at startup.
+                     A new file is created on every run; the previous
+                     session's log is moved into logs/log_archive/ (capped
+                     at 30 files, oldest pruned on overflow).
     """
     _enable_windows_ansi()
 
@@ -158,10 +185,12 @@ def setup_logging(
     console_handler = logging.StreamHandler(sys.stdout)
     console_handler.setFormatter(ColorFormatter(fmt, datefmt=datefmt))
 
-    # --- file handler (plain text, new file each run) ---
+    # --- prepare log dir and archive previous session before opening new file ---
     log_path = Path(log_dir)
     log_path.mkdir(parents=True, exist_ok=True)
+    moved, pruned = _archive_previous_logs(log_path)
 
+    # --- file handler (plain text, new file each run) ---
     run_ts = datetime.now(UTC).strftime("%Y-%m-%d_%H-%M-%S")
     log_file = log_path / f"{run_ts}.log"
 
@@ -179,7 +208,11 @@ def setup_logging(
     logging.getLogger("websockets").setLevel(logging.WARNING)
     logging.getLogger("aiohttp").setLevel(logging.WARNING)
 
-    # Purge old files after handlers are set so the purge message lands in the new log
-    _purge_old_logs(log_path, log_retention_days)
-
     logging.getLogger(__name__).info("logging to file: %s", log_file)
+    if moved or pruned:
+        logging.getLogger(__name__).info(
+            "log archive: moved %d previous log(s), pruned %d (cap=%d)",
+            moved,
+            pruned,
+            _ARCHIVE_CAP,
+        )

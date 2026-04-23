@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -54,6 +55,18 @@ _CLOB_EXECUTOR_WORKERS = 8
 # quantities. Anything larger is a real partial — see post-mortem 2026-04-22
 # §5.2 and ``is_order_fully_filled``.
 _FILL_TOLERANCE_USD = 0.01
+
+# Early-exit SELL safety haircut. The filled ``size`` reported by the trade
+# event exceeds the on-chain deliverable shares by a small amount (observed
+# 1.22 % on 2026-04-22 T4: reported 3.84337 sh, on-chain 3.79633 sh —
+# settlement-fee / rounding discrepancy the bot's fee model doesn't
+# capture). A 2 % haircut leaves comfortable margin above the observed gap
+# while forfeiting < 1 % of realized-size. Without it the CLOB rejects the
+# exit SELL with "not enough balance" and the CUSUM exit never lands.
+_EARLY_EXIT_SHARE_HAIRCUT = 0.02
+
+# Share quantization on Polymarket CLOB: 1 microshare (1e-6).
+_SHARE_QUANTUM = 1e-6
 
 
 def _parse_fak_filled_shares(resp: dict[str, Any]) -> float:
@@ -215,6 +228,29 @@ class OrderManager:
             return None
         avg_entry = total_cost / total_shares
 
+        # Shave a safety haircut off the requested sell size so we don't
+        # over-request relative to on-chain deliverable balance. Rounded
+        # DOWN to Polymarket's microshare quantum so the CLOB accepts the
+        # number verbatim. See _EARLY_EXIT_SHARE_HAIRCUT docstring.
+        sell_shares = (
+            math.floor(total_shares * (1.0 - _EARLY_EXIT_SHARE_HAIRCUT) / _SHARE_QUANTUM)
+            * _SHARE_QUANTUM
+        )
+        if sell_shares <= 0:
+            log.warning(
+                "live exit_position_early: sell_shares after haircut = %.6f, skipping",
+                sell_shares,
+            )
+            return None
+        if abs(sell_shares - total_shares) > _SHARE_QUANTUM:
+            log.info(
+                "live exit_position_early: applying %.1f%% share haircut "
+                "(reported=%.6f requested=%.6f)",
+                _EARLY_EXIT_SHARE_HAIRCUT * 100.0,
+                total_shares,
+                sell_shares,
+            )
+
         if not self._breaker.can_attempt():
             log.warning("early exit blocked: CLOB circuit breaker OPEN")
             return None
@@ -231,7 +267,7 @@ class OrderManager:
                         self.clob.create_order,
                         OrderArgs(
                             price=sell_price,
-                            size=total_shares,
+                            size=sell_shares,
                             side=SELL,
                             token_id=token_id,
                         ),

@@ -213,16 +213,18 @@ class WindowEventHandler:
 
         Returns WindowTransitionResult with potentially updated strategy/decay_detector.
         """
-        # v3.2 §5.8: decrement the post-loss cooldown at the TOP of the
-        # transition, before outcome processing can re-arm it. A loss
-        # resolved this window arms the counter for the NEXT window.
-        self._post_loss_cooldown.on_window_boundary()
-
         # Phase 1: Finalize previous window (paper mode)
         if last_window_ts > 0:
             self._finalize_previous_window(order_mgr, last_window_ts, strategy)
 
-        # Phase 2-3: Process trade outcome + lifecycle updates
+        # Phase 2-3: Process trade outcome + lifecycle updates. For paper
+        # mode this is where ``register_loss`` fires; the cooldown still
+        # sees ``current_window_ts = last_window_ts`` because we haven't
+        # advanced it yet. That's intentional — the absolute-ts freeze
+        # formula anchors on the max of the resolved window and the
+        # current window, so paper (arm with current = old window) and
+        # live (arm with current = newer window) converge on the right
+        # freeze-start without ordering surgery on register_loss.
         if last_window_ts > 0:
             strategy, decay_detector = self._process_trade_outcome(
                 strategy,
@@ -249,6 +251,12 @@ class WindowEventHandler:
             decay_detector,
             last_window_ts,
         )
+
+        # v3.6.2: advance the post-loss cooldown pointer AFTER outcome
+        # processing so paper-mode register_loss sees the old window as
+        # current (see Phase 2-3 comment above).
+        _advance_to = new_window_ts or (last_window_ts + 300 if last_window_ts > 0 else 0)
+        self._post_loss_cooldown.on_window_boundary(_advance_to)
 
         return WindowTransitionResult(
             strategy=strategy,
@@ -652,7 +660,7 @@ class WindowEventHandler:
                 if _kelly_entry > 0 and _kelly_size > 0:
                     self._bankroll_tracker.update_loss(_kelly_size, _kelly_entry, fee=_kelly_fee)
                 if pnl < 0.0:
-                    self._post_loss_cooldown.register_loss(-pnl, _bankroll_before)
+                    self._post_loss_cooldown.register_loss(-pnl, _bankroll_before, last_window_ts)
 
             # v2.9 Kelly/paper bankroll reconcile. In paper mode the
             # authoritative balance is PaperOrderManager._balance, which is

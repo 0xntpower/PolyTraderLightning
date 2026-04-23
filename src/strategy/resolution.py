@@ -570,8 +570,11 @@ class ResolutionManager:
         # v3.2 §5.8 post-loss cooldown — arm after any settled loss (live or
         # early-exit) large enough to clear the configured threshold. Paper
         # mode arms via ``WindowEventHandler._process_trade_outcome``.
+        # v3.6.2: pass the resolved window's ts so the absolute-ts freeze
+        # semantics hold even when gamma poll arms the cooldown mid-window
+        # (post-mortem 2026-04-22 T4 observed zero-window freeze bug).
         if not won and pnl < 0.0:
-            self._post_loss_cooldown.register_loss(-pnl, bankroll_before)
+            self._post_loss_cooldown.register_loss(-pnl, bankroll_before, pr.window_ts)
 
         # Position tracker
         self._position_tracker.record_window(

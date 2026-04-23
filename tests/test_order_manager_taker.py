@@ -244,3 +244,119 @@ def test_exposure_rolled_back_when_post_order_returns_no_order_id(
 
     assert order_id is None
     assert tracker.window_exposure_usd == pytest.approx(0.0)
+
+
+# ---------------------------------------------------------------------------
+# Fix 2 (v3.6.2) — early-exit SELL applies share haircut to stay within
+# the on-chain deliverable balance. Observed on 2026-04-22 T4:
+#   filled size reported = 3.84337 sh  /  on-chain balance = 3.79633 sh
+#   CLOB rejected SELL with "not enough balance / allowance"
+# Fix: shave a 2 % haircut off the filled size, rounded down to 6 dp.
+# ---------------------------------------------------------------------------
+
+
+def test_early_exit_applies_share_haircut(manager: OrderManager, state: MarketState) -> None:
+    """The SELL request size must be strictly less than the reported filled
+    size, by approximately the haircut percentage. Reproduces the T4
+    fill-size (3.84337 sh) to anchor the number in a real observation."""
+    from market_data.state import LiveFill
+
+    token_id = "asset-down-test"
+    state.up_token_id = "asset-up-test"
+    state.down_token_id = token_id
+    state.live_fills["entry-order"] = LiveFill(
+        order_id="entry-order",
+        token_id=token_id,
+        side="BUY",
+        price=0.83,
+        size=3.84337,
+        size_usd=3.84337 * 0.83,
+        fill_time=0.0,
+        is_maker=False,
+    )
+
+    captured_args: list[Any] = []
+
+    def capture_create(args: Any) -> dict[str, Any]:
+        captured_args.append(args)
+        return {"signed": True}
+
+    manager.clob.create_order.side_effect = capture_create
+    manager.clob.post_order.return_value = {
+        "orderID": "0xexit",
+        "takingAmount": "3.0",
+    }
+    manager.fee_tracker.record_taker_fee = MagicMock(return_value=0.0)  # type: ignore[method-assign]
+
+    asyncio.run(manager.exit_position_early(sell_price=0.50))
+
+    assert len(captured_args) == 1
+    sell_args = captured_args[0]
+    # 3.84337 * 0.98 = 3.7665026 → floor to microshare precision = 3.766502.
+    assert sell_args.size == pytest.approx(3.766502, abs=1e-6)
+    # Must be strictly below the T4 observed on-chain balance (3.79633).
+    assert sell_args.size < 3.84337
+    assert sell_args.size < 3.79633
+
+
+def test_early_exit_haircut_quantized_to_microshares(
+    manager: OrderManager, state: MarketState
+) -> None:
+    """The SELL size must be an integer number of microshares so the
+    CLOB accepts it verbatim without rounding on its end."""
+    from market_data.state import LiveFill
+
+    token_id = "asset-odd"
+    state.up_token_id = "asset-up-test"
+    state.down_token_id = token_id
+    state.live_fills["entry"] = LiveFill(
+        order_id="entry",
+        token_id=token_id,
+        side="BUY",
+        price=0.77,
+        size=1.23456789,
+        size_usd=1.23456789 * 0.77,
+        fill_time=0.0,
+        is_maker=False,
+    )
+
+    captured: list[Any] = []
+
+    def capture(args: Any) -> dict[str, Any]:
+        captured.append(args)
+        return {"signed": True}
+
+    manager.clob.create_order.side_effect = capture
+    manager.clob.post_order.return_value = {"orderID": "0xid", "takingAmount": "1.0"}
+    manager.fee_tracker.record_taker_fee = MagicMock(return_value=0.0)  # type: ignore[method-assign]
+
+    asyncio.run(manager.exit_position_early(sell_price=0.50))
+
+    size = captured[0].size
+    assert abs(size * 1_000_000 - round(size * 1_000_000)) < 1e-6
+
+
+def test_early_exit_returns_none_when_haircut_yields_zero(
+    manager: OrderManager, state: MarketState
+) -> None:
+    """A position so small that the haircut rounds down to zero must
+    return None rather than submit a zero-size order."""
+    from market_data.state import LiveFill
+
+    token_id = "asset-tiny"
+    state.up_token_id = "asset-up-test"
+    state.down_token_id = token_id
+    state.live_fills["tiny"] = LiveFill(
+        order_id="tiny",
+        token_id=token_id,
+        side="BUY",
+        price=0.50,
+        size=1e-8,
+        size_usd=1e-8 * 0.50,
+        fill_time=0.0,
+        is_maker=False,
+    )
+
+    result = asyncio.run(manager.exit_position_early(sell_price=0.40))
+    assert result is None
+    manager.clob.create_order.assert_not_called()

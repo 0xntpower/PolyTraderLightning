@@ -45,7 +45,7 @@ from shared.discord import (
     send_presignal_warmup_done,
     send_sprt_decay_alert,
 )
-from shared.pslagent import enroll_if_requested
+from shared.pslagent import announce_alive, enroll_if_requested
 from shared.state_publisher import StatePublisher
 from shared.trade_journal import RecentFireMailbox, TradeJournal
 from strategy.kelly import KELLY_OUTCOME_WINDOW_SIZE, BankrollTracker
@@ -1488,6 +1488,8 @@ def main() -> None:
         log_files=("logs/bot.log",),
         telemetry_endpoint=("auto", 19732),
     )
+    # Adopt-on-announce: lets the agent discover us when started externally.
+    announce_alive("polytrader")
 
     import argparse
 

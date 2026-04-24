@@ -45,6 +45,7 @@ from shared.discord import (
     send_presignal_warmup_done,
     send_sprt_decay_alert,
 )
+from shared.pslagent import enroll_if_requested
 from shared.state_publisher import StatePublisher
 from shared.trade_journal import RecentFireMailbox, TradeJournal
 from strategy.kelly import KELLY_OUTCOME_WINDOW_SIZE, BankrollTracker
@@ -1478,6 +1479,16 @@ async def run(signal_path_override: str | None = None, standalone: bool = False)
 
 
 def main() -> None:
+    # PSLAgent enrollment shim: completes a localhost handshake and exits
+    # when the agent is enrolling this bot. No-op if env vars aren't set.
+    enroll_if_requested(
+        id="polytrader",
+        display_name="PolyTraderLightning",
+        config_files=(),
+        log_files=("logs/bot.log",),
+        telemetry_endpoint=("auto", 19732),
+    )
+
     import argparse
 
     parser = argparse.ArgumentParser(

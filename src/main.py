@@ -1484,8 +1484,8 @@ def main() -> None:
     enroll_if_requested(
         id="polytrader",
         display_name="PolyTraderLightning",
-        config_files=(),
-        log_files=("logs/bot.log",),
+        config_files=("config.yml",),
+        log_files=("data/logs/bot.log",),
         telemetry_endpoint=("auto", 19732),
     )
     # Adopt-on-announce: lets the agent discover us when started externally.

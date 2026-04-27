@@ -197,6 +197,21 @@ def setup_logging(
     file_handler = logging.FileHandler(log_file, encoding="utf-8")
     file_handler.setFormatter(logging.Formatter(fmt, datefmt=datefmt))
 
+    # Refresh ``bot.log`` symlink to point at the active session's log file.
+    # PSLAgent's manifest declares ``log_files = ["data/logs/bot.log"]`` —
+    # log_range / log_grep require an exact relative path that exists, but
+    # the actual filename is date-stamped per run. The symlink bridges the
+    # two: the agent reads ``bot.log`` and gets the live session's content
+    # without needing wildcard support. Best-effort — failure to refresh
+    # falls back gracefully (the dated file still works directly).
+    stable_link = log_path / "bot.log"
+    try:
+        if stable_link.is_symlink() or stable_link.exists():
+            stable_link.unlink()
+        stable_link.symlink_to(log_file.name)
+    except OSError as exc:
+        print(f"warning: failed to refresh bot.log symlink: {exc}", file=sys.stderr)
+
     # --- root logger ---
     root = logging.getLogger()
     root.setLevel(log_level)

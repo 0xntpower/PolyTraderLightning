@@ -82,11 +82,35 @@ class SignalConfig:
     obi_depth: str = "none"
     # v3.7: signal-family lifetime tracking. Populated by the orchestrator
     # from LifetimeTracker state; passed through for bot Discord surfacing.
-    # None during bootstrap phase (orchestrator has < 30 samples) or when
-    # the orchestrator's tracker failed this cycle.
+    # None during bootstrap phase or when the orchestrator's tracker
+    # failed this cycle.
     signal_age_h: float | None = None
+    # v3.7 phase-2: typical (median) signal lifetime over the eligible
+    # samples in the orchestrator's rolling buffer. Replaces the legacy
+    # ``est_max_lifetime_h`` (p80) for the same Discord slot — bot
+    # accepts both for one release for backwards compatibility.
+    typical_lifetime_h: float | None = None
+    typical_lifetime_samples: int | None = None
+    typical_lifetime_status: str = "unavailable"  # 'unavailable' | 'tentative' | 'stable'
+    # Deprecated v3.7 phase-1 fields — retained while in-flight payloads
+    # may still carry them. Read by ``from_engine_json`` for backwards
+    # compat; new orchestrators populate ``typical_lifetime_*`` instead.
     est_max_lifetime_h: float | None = None
     lifetime_samples: int | None = None
+    # v3.7 phase-1: pool-anchored age. ``first_fire_window_ts`` is the Unix
+    # second of the chronologically-earliest window in the engine's rolling
+    # pool where this exact signal fired. ``first_fire_window_saturated``
+    # is true when that timestamp equals the pool's oldest window — the
+    # value is then a *lower bound*, not a measurement (the signal may have
+    # been firing before the pool's oldest window was loaded). None when
+    # the engine pre-dates v3.7 or the field was missing for any reason.
+    first_fire_window_ts: int | None = None
+    first_fire_window_saturated: bool = False
+    # v3.7 phase-3: when the orchestrator's age-aware selector chose this
+    # signal over a top-by-score candidate, ``selected_over`` is the label
+    # of the runner-up. Surfaced on the signal-updated Discord embed.
+    # None when this signal was the top by score.
+    selected_over: str | None = None
 
     @classmethod
     def from_engine_json(cls, data: dict[str, Any]) -> SignalConfig:
@@ -120,8 +144,16 @@ class SignalConfig:
             ev_per_trade=data.get("evPerTrade", 0.0),
             composite_score=data.get("compositeScore", 0.0),
             signal_age_h=_optional_float(data.get("signalAgeH")),
+            typical_lifetime_h=_optional_float(data.get("typicalLifetimeH")),
+            typical_lifetime_samples=_optional_int(data.get("typicalLifetimeSamples")),
+            typical_lifetime_status=str(data.get("typicalLifetimeStatus", "unavailable")),
             est_max_lifetime_h=_optional_float(data.get("estMaxLifetimeH")),
             lifetime_samples=_optional_int(data.get("lifetimeSamples")),
+            first_fire_window_ts=_optional_int(data.get("firstFireWindowTs")),
+            first_fire_window_saturated=bool(data.get("firstFireWindowSaturated", False)),
+            selected_over=(
+                str(data["selectedOver"]) if isinstance(data.get("selectedOver"), str) else None
+            ),
             **cls._parse_post_fire(data),
         )
 
@@ -183,8 +215,14 @@ class SignalConfig:
                 "lossSamples": self.post_fire_loss_samples,
             },
             "signalAgeH": self.signal_age_h,
+            "typicalLifetimeH": self.typical_lifetime_h,
+            "typicalLifetimeSamples": self.typical_lifetime_samples,
+            "typicalLifetimeStatus": self.typical_lifetime_status,
             "estMaxLifetimeH": self.est_max_lifetime_h,
             "lifetimeSamples": self.lifetime_samples,
+            "firstFireWindowTs": self.first_fire_window_ts,
+            "firstFireWindowSaturated": self.first_fire_window_saturated,
+            "selectedOver": self.selected_over,
         }
 
     @property

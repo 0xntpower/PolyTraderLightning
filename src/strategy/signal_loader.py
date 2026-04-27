@@ -295,14 +295,39 @@ def validate_momentum_signal(
             )
             post_fire_max_safe_erosion_pct = None
 
-    # v3.7: orchestrator-tracked family age and aggregate lifetime p80.
-    # All three fields are optional and may be None (bootstrap phase,
-    # disabled tracker, older orchestrator). Accept missing / null /
-    # non-numeric gracefully — there is nothing the bot does with these
-    # values except surface them on Discord.
+    # v3.7: orchestrator-tracked age + typical-lifetime publication.
+    # Accept missing / null / non-numeric gracefully — bootstrap and
+    # older-orchestrator paths produce None here, which the bot handles
+    # by suppressing the corresponding Discord field.
+    #
+    # Phase 2 introduces ``typicalLifetimeH`` / ``typicalLifetimeSamples``
+    # / ``typicalLifetimeStatus`` to replace the legacy
+    # ``estMaxLifetimeH`` / ``lifetimeSamples`` slot. Prefer the new
+    # fields when present; fall back to the legacy ones for one release
+    # of orchestrator-bot version skew.
     signal_age_h = _optional_float_field(data.get("signalAgeH"))
-    est_max_lifetime_h = _optional_float_field(data.get("estMaxLifetimeH"))
-    lifetime_samples = _optional_int_field(data.get("lifetimeSamples"))
+    typical_lifetime_h = _optional_float_field(data.get("typicalLifetimeH"))
+    typical_lifetime_samples = _optional_int_field(data.get("typicalLifetimeSamples"))
+    typical_lifetime_status_raw = data.get("typicalLifetimeStatus")
+    typical_lifetime_status = (
+        str(typical_lifetime_status_raw)
+        if isinstance(typical_lifetime_status_raw, str)
+        else "unavailable"
+    )
+    legacy_est_max = _optional_float_field(data.get("estMaxLifetimeH"))
+    legacy_samples = _optional_int_field(data.get("lifetimeSamples"))
+    if typical_lifetime_h is None and legacy_est_max is not None:
+        # Older orchestrator only sent the legacy p80 slot. Use it as the
+        # display value but keep the status pessimistic so downstream
+        # consumers know it's a fallback path.
+        typical_lifetime_h = legacy_est_max
+        if typical_lifetime_samples is None:
+            typical_lifetime_samples = legacy_samples
+        if typical_lifetime_status == "unavailable":
+            typical_lifetime_status = "tentative"
+
+    selected_over_raw = data.get("selectedOver")
+    selected_over = str(selected_over_raw) if isinstance(selected_over_raw, str) else None
 
     cfg = MomentumSignalConfig(
         rank=rank,
@@ -326,8 +351,10 @@ def validate_momentum_signal(
         obi_threshold=obi_threshold,
         obi_depth=obi_depth,
         signal_age_h=signal_age_h,
-        est_max_lifetime_h=est_max_lifetime_h,
-        lifetime_samples=lifetime_samples,
+        typical_lifetime_h=typical_lifetime_h,
+        typical_lifetime_samples=typical_lifetime_samples,
+        typical_lifetime_status=typical_lifetime_status,
+        selected_over=selected_over,
     )
 
     # --- Completeness check: every field the engine produces must arrive ---

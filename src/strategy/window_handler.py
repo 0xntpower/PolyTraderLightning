@@ -885,8 +885,10 @@ class WindowEventHandler:
             obi_threshold=new_sc.obi_threshold,
             obi_depth=new_sc.obi_depth.value,
             signal_age_h=new_sc.signal_age_h,
-            est_max_lifetime_h=new_sc.est_max_lifetime_h,
-            lifetime_samples=new_sc.lifetime_samples,
+            typical_lifetime_h=new_sc.typical_lifetime_h,
+            typical_lifetime_samples=new_sc.typical_lifetime_samples,
+            typical_lifetime_status=new_sc.typical_lifetime_status,
+            selected_over=new_sc.selected_over,
         )
 
         if same_signal:

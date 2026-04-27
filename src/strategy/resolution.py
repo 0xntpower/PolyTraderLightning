@@ -101,14 +101,14 @@ class PendingResolution:
     # combined entries — ``_resolve`` uses this value directly so it handles
     # mixed maker/taker entries correctly.
     entry_taker_fee: float = 0.0
-    # v3.7: orchestrator-tracked signal-family age at fire time and the
-    # orchestrator's p80 lifetime estimate as of delivery. Observational —
-    # surfaces on the WIN/LOSS Discord embed so operators can eyeball age-
-    # vs-outcome correlation. All three may be None (bootstrap, tracker
-    # disabled, older orchestrator).
+    # v3.7: engine-anchored signal age at fire time and the orchestrator's
+    # typical-lifetime publication as of delivery. Observational on the
+    # WIN/LOSS Discord embed. All three may be None during bootstrap or
+    # tracker failure.
     signal_age_at_fire_h: float | None = None
-    est_max_lifetime_h: float | None = None
-    lifetime_samples: int | None = None
+    typical_lifetime_h: float | None = None
+    typical_lifetime_samples: int | None = None
+    typical_lifetime_status: str = "unavailable"
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,15 +254,16 @@ class ResolutionManager:
             maker_usd=maker_usd,
             taker_usd=taker_usd,
             entry_taker_fee=entry_taker_fee,
-            # v3.7: snapshot the orchestrator-tracked family age at
-            # fire time so the WIN/LOSS Discord embed reports what the
-            # bot saw when it decided to fire (orchestrator re-delivers
+            # v3.7: snapshot the engine-anchored family age at fire
+            # time so the WIN/LOSS Discord embed reports what the bot
+            # saw when it decided to fire (orchestrator re-delivers
             # every ~10 min, so the age may have grown by up to one
             # cycle by resolve; close enough for eyeballing age-vs-
             # outcome patterns).
             signal_age_at_fire_h=signal_cfg.signal_age_h,
-            est_max_lifetime_h=signal_cfg.est_max_lifetime_h,
-            lifetime_samples=signal_cfg.lifetime_samples,
+            typical_lifetime_h=signal_cfg.typical_lifetime_h,
+            typical_lifetime_samples=signal_cfg.typical_lifetime_samples,
+            typical_lifetime_status=signal_cfg.typical_lifetime_status,
         )
         log.info(
             "trade pending resolution: window=%d slug=%s "
@@ -619,8 +620,9 @@ class ResolutionManager:
                 maker_usd=pr.maker_usd,
                 taker_usd=pr.taker_usd,
                 signal_age_at_fire_h=pr.signal_age_at_fire_h,
-                est_max_lifetime_h=pr.est_max_lifetime_h,
-                lifetime_samples=pr.lifetime_samples,
+                typical_lifetime_h=pr.typical_lifetime_h,
+                typical_lifetime_samples=pr.typical_lifetime_samples,
+                typical_lifetime_status=pr.typical_lifetime_status,
                 obi_threshold=sc.obi_threshold,
                 obi_depth=sc.obi_depth.value,
             )

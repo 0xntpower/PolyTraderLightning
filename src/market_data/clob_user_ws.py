@@ -24,6 +24,15 @@ class _OrderEventMsg(TypedDict, total=False):
     event_type: str
 
 
+class _MakerOrderEntry(TypedDict, total=False):
+    """V2 schema: nested entry inside ``maker_orders[]`` on a trade event."""
+
+    order_id: str
+    matched_amount: str | float
+    price: str | float
+    outcome: str
+
+
 class _TradeEventMsg(TypedDict, total=False):
     id: str  # unique trade ID; distinguishes status transitions from new partials
     asset_id: str
@@ -31,10 +40,17 @@ class _TradeEventMsg(TypedDict, total=False):
     price: float | str
     side: str
     status: str
+    # V1 / fallback flat field names (some pre-V2 deployments still send these).
     maker_order_id: str
     makerOrderId: str
     order_id: str
     orderId: str
+    # V2 structured fields per docs.polymarket.com/developers/CLOB/websocket/user-channel.
+    # ``maker_orders`` is the per-trade array of resting-side counterparties;
+    # our placed maker fills appear there with our ``order_id``. ``taker_order_id``
+    # is the aggressor side; our placed FOK/FAK fills are matched via this field.
+    maker_orders: list[_MakerOrderEntry]
+    taker_order_id: str
     event_type: str
 
 
@@ -120,7 +136,20 @@ def _handle_trade(data: _TradeEventMsg, state: MarketState) -> None:
     status = data.get("status", "")
     trade_id = data.get("id", "")
 
-    # Try to extract maker_order_id (field name varies by CLOB version)
+    # Resolve the order ID this trade is associated with — the bot's order
+    # ID, not the counterparty's. Three layers of progressively-V2 lookups,
+    # all reading the same trade event:
+    #
+    #   1. Flat top-level fields (V1 and some V2 deployments still emit these
+    #      for backward-compat). Listed in preference order.
+    #   2. V2 ``maker_orders`` array — our maker fills appear here with our
+    #      ``order_id``. We pick the FIRST entry whose order_id matches one
+    #      of our active orders (a single trade can match against multiple
+    #      makers; only ours matters for fill-tracking).
+    #   3. V2 ``taker_order_id`` — our FOK/FAK fills appear here.
+    #
+    # Method 2 (token+side fuzzy match below) remains the final fallback for
+    # any payload that strips all of the above.
     maker_order_id = (
         data.get("maker_order_id")
         or data.get("makerOrderId")
@@ -128,6 +157,22 @@ def _handle_trade(data: _TradeEventMsg, state: MarketState) -> None:
         or data.get("orderId")
         or ""
     )
+
+    if not maker_order_id:
+        # V2 maker_orders[] — pick the first entry that's in our active set.
+        for mo in data.get("maker_orders") or []:
+            if not isinstance(mo, dict):
+                continue
+            mo_oid = mo.get("order_id", "")
+            if mo_oid and mo_oid in state.active_order_ids:
+                maker_order_id = mo_oid
+                break
+
+    if not maker_order_id:
+        # V2 taker_order_id — our placed FOK/FAK is the taker side.
+        toid = data.get("taker_order_id", "")
+        if toid and toid in state.active_order_ids:
+            maker_order_id = toid
 
     log.info(
         "fill token=%s side=%s size=%.2f price=%.4f status=%s order=%s",

@@ -214,3 +214,120 @@ def test_sell_side_decrements_position_counter(state: MarketState) -> None:
     # Position reduced.
     assert state.position_down == pytest.approx(5.0 - 1.5)
     assert state.live_fills["0xsell-order"].side == "SELL"
+
+
+# ---------------------------------------------------------------------------
+# V2 structured fields — maker_orders[] and taker_order_id
+# ---------------------------------------------------------------------------
+#
+# Polymarket CLOB V2 (live since 2026-04-28) emits trade events with
+# ``maker_orders[]`` (array of resting-side counterparties) and
+# ``taker_order_id`` (aggressor side) instead of (or in addition to) the
+# flat ``maker_order_id`` / ``order_id`` fields. The handler's order-ID
+# resolver must look at both layers so we can directly match V2 fills
+# instead of relying on the token+side fuzzy fallback.
+
+
+def test_v2_maker_orders_array_resolves_our_order_id(state: MarketState) -> None:
+    """Bot's maker order id appears inside V2 ``maker_orders[]``. Resolver
+    must find it and treat the trade as ours.
+    """
+    evt: dict = {
+        "id": _TRADE_A,
+        "asset_id": _DOWN_TOKEN,
+        "size": 0.5,
+        "price": 0.80,
+        "side": "BUY",
+        "status": "MATCHED",
+        # V2 schema: no flat maker_order_id — it's nested in maker_orders[].
+        "maker_orders": [
+            {"order_id": "0xother-counterparty", "matched_amount": "0.10", "price": "0.80"},
+            {"order_id": _ORDER_ID, "matched_amount": "0.50", "price": "0.80"},
+        ],
+        "taker_order_id": "0xtaker-aggressor",
+    }
+    _handle_trade(evt, state)
+
+    assert _ORDER_ID in state.live_fills
+    fill = state.live_fills[_ORDER_ID]
+    assert fill.size == pytest.approx(0.5)
+    assert fill.is_maker is True
+    assert fill.seen_trade_ids == {_TRADE_A}
+
+
+def test_v2_taker_order_id_resolves_our_fok(state: MarketState) -> None:
+    """When the bot places a FOK/FAK and it fills, our order_id appears
+    as ``taker_order_id`` on the trade event. Resolver must match.
+    """
+    # Reset to a taker-style active order set: order is in active_order_ids
+    # but NOT in maker_order_ids.
+    state.active_order_ids = ["0xtaker-fok"]
+    state.maker_order_ids = set()
+
+    evt: dict = {
+        "id": _TRADE_A,
+        "asset_id": _DOWN_TOKEN,
+        "size": 1.0,
+        "price": 0.80,
+        "side": "BUY",
+        "status": "MATCHED",
+        "maker_orders": [
+            {"order_id": "0xresting-maker", "matched_amount": "1.00", "price": "0.80"},
+        ],
+        "taker_order_id": "0xtaker-fok",
+    }
+    _handle_trade(evt, state)
+
+    assert "0xtaker-fok" in state.live_fills
+    fill = state.live_fills["0xtaker-fok"]
+    assert fill.size == pytest.approx(1.0)
+    # is_maker reflects whether the order is in maker_order_ids — should
+    # be False here since this was a taker placement.
+    assert fill.is_maker is False
+
+
+def test_v2_unrelated_maker_orders_does_not_match(state: MarketState) -> None:
+    """A trade where neither ``maker_orders[]`` nor ``taker_order_id``
+    references one of our active orders, AND the token is unrelated, must
+    be dropped — not fuzzy-matched against an unrelated active order.
+    """
+    state.active_order_ids = ["0xour-order"]
+    evt: dict = {
+        "id": _TRADE_A,
+        "asset_id": "0xunrelated-market-token",
+        "size": 1.0,
+        "price": 0.80,
+        "side": "BUY",
+        "status": "MATCHED",
+        "maker_orders": [
+            {"order_id": "0xother-1", "matched_amount": "0.5", "price": "0.80"},
+            {"order_id": "0xother-2", "matched_amount": "0.5", "price": "0.80"},
+        ],
+        "taker_order_id": "0xother-taker",
+    }
+    _handle_trade(evt, state)
+
+    assert "0xour-order" not in state.live_fills
+
+
+def test_v2_flat_maker_order_id_still_takes_precedence(state: MarketState) -> None:
+    """Some V2 deployments (and older ones) may still emit flat
+    ``maker_order_id``. Resolver picks the flat field FIRST so legacy
+    behaviour is preserved when both are present.
+    """
+    evt: dict = {
+        "id": _TRADE_A,
+        "asset_id": _DOWN_TOKEN,
+        "size": 0.5,
+        "price": 0.77,
+        "side": "BUY",
+        "status": "MATCHED",
+        "maker_order_id": _ORDER_ID,  # flat — wins
+        "maker_orders": [
+            {"order_id": "0xshould-not-be-picked", "matched_amount": "0.5", "price": "0.77"},
+        ],
+    }
+    _handle_trade(evt, state)
+
+    assert _ORDER_ID in state.live_fills
+    assert "0xshould-not-be-picked" not in state.live_fills

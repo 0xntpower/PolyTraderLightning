@@ -848,7 +848,16 @@ async def _strategy_loop(
     _startup_source: str | None = None
     if order_mgr.mode == "live" and isinstance(order_mgr, OrderManager):
         _api_bal = await order_mgr.refresh_balance()
-        if _api_bal is not None and _api_bal > 0:
+        if _api_bal is not None:
+            # ``0.0`` is a valid authoritative value: an empty wallet (drained,
+            # never funded, or pUSD-unwrapped post-V2-migration) is real on-chain
+            # state, not an API failure. Treating zero as authoritative and
+            # syncing kelly to $0 ensures Kelly sizing matches reality and the
+            # logged bankroll value is honest. The pre-trade balance gate
+            # already prevents fires against a $0 wallet, so this only affects
+            # observability — but a stale ``$55.87`` kelly value while on-chain
+            # is empty is the v3.7 session's headline confusion (post-mortem
+            # 2026-04-28 §1, §5.2). Only ``None`` means "fetch failed".
             _startup_authoritative = _api_bal
             _startup_source = "onchain"
         else:

@@ -964,9 +964,14 @@ class WindowEventHandler:
         if order_mgr.mode == "live":
             _api_bal = await order_mgr.refresh_balance()  # type: ignore[union-attr]  # mode=="live" guarantees OrderManager
             _BANKROLL_SYNC_INTERVAL = 1800.0  # noqa: N806  # constant defined in function scope
+            # ``0.0`` is authoritative on-chain truth (drained, never funded,
+            # or pUSD-unwrapped post-V2-migration). Sync to it so kelly stops
+            # reporting a stale value while the wallet is empty. ``None``
+            # alone means the API call failed; keep the cache in that case.
+            # See main.py startup-reconcile rationale (post-mortem 2026-04-28
+            # §1, §5.2).
             if (
                 _api_bal is not None
-                and _api_bal > 0
                 and time.time() - self._last_bankroll_sync >= _BANKROLL_SYNC_INTERVAL
             ):
                 self._bankroll_tracker.sync_from_api(_api_bal)

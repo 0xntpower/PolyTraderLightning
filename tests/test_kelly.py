@@ -465,6 +465,23 @@ class TestBankrollTracker:
         drift = bt.sync_from_api(1000.0)
         assert abs(drift) <= 0.01
 
+    def test_sync_zero_balance_drains_kelly(self, tmp_path):
+        """Zero on-chain balance is authoritative truth, not an API failure.
+
+        A wallet that's been drained, never funded, or pUSD-unwrapped during
+        the 2026-04-28 V2 migration cutover legitimately holds $0. Kelly
+        must mirror that — keeping a stale ``$1000`` cache while on-chain
+        is empty was the v3.7 session's headline confusion (post-mortem
+        2026-04-28 §1, §5.2). Distinct from ``-50.0`` (impossible — must
+        flag corruption) and ``20000.0`` from a $1000 base (10x jump —
+        suspected API glitch). Zero is real and should apply cleanly.
+        """
+        bt = BankrollTracker(initial_bankroll=1000.0, path=tmp_path / "b.json")
+        drift = bt.sync_from_api(0.0)
+        assert drift == pytest.approx(-1000.0)
+        assert bt.bankroll == 0.0
+        assert not bt.is_corrupted
+
     # ------------------------------------------------------------------
     # Corruption handling (Item 4)
     # ------------------------------------------------------------------

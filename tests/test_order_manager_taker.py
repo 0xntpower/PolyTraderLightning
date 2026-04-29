@@ -3,7 +3,7 @@
 Covers the two fixes from the 2026-04-22 live-session post-mortem:
 
 - Fix A (§5.1): ``MarketOrderArgs`` must be constructed with ``side=BUY``;
-  omitting it raises ``TypeError`` at py-clob-client construction time and
+  omitting it raises ``TypeError`` at py-clob-client-v2 construction time and
   crashes every SKIP_MAKER fire before an order is placed.
 - Fix B (§5.3): any exit from the post path that does not commit must roll
   back ``risk.tracker.add_exposure`` — including unanticipated exceptions
@@ -17,13 +17,13 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock
 
 import pytest
-from py_clob_client.exceptions import (  # type: ignore[import-untyped]
+from py_clob_client_v2.exceptions import (  # type: ignore[import-untyped]
     PolyApiException,
 )
-from py_clob_client.order_builder.constants import BUY  # type: ignore[import-untyped]
+from py_clob_client_v2.order_builder.constants import BUY  # type: ignore[import-untyped]
 
 if TYPE_CHECKING:
-    from py_clob_client.clob_types import (  # type: ignore[import-untyped]
+    from py_clob_client_v2.clob_types import (  # type: ignore[import-untyped]
         MarketOrderArgs,
     )
 

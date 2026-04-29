@@ -70,7 +70,7 @@ from utils.reconnect import FeedHealthMonitor, ws_connect_forever
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from py_clob_client.client import (  # type: ignore[import-untyped]  # no stubs available
+    from py_clob_client_v2.client import (  # type: ignore[import-untyped]  # no stubs available
         ClobClient,
     )
 
@@ -341,7 +341,7 @@ async def _wait_for_first_signal(
 
 
 def _build_clob_client(cfg: Config) -> ClobClient:
-    from py_clob_client.client import ClobClient
+    from py_clob_client_v2.client import ClobClient
 
     from shared.keystore import get_secret
 
@@ -355,7 +355,8 @@ def _build_clob_client(cfg: Config) -> ClobClient:
         signature_type=cfg.connections.signature_type,
         funder=funder_address,
     )
-    client.set_api_creds(client.create_or_derive_api_creds())
+    # py-clob-client-v2 renamed `create_or_derive_api_creds` → `create_or_derive_api_key`.
+    client.set_api_creds(client.create_or_derive_api_key())
     return client
 
 
@@ -1318,7 +1319,7 @@ async def run(signal_path_override: str | None = None, standalone: bool = False)
     ) as session:
         # In live mode, build CLOB client early so we can reuse it for
         # both startup validation and the user WS creds (avoids a
-        # duplicate create_or_derive_api_creds() HTTP call).
+        # duplicate create_or_derive_api_key() HTTP call).
         clob = None
         derived_creds = None
         if not cfg.is_paper:

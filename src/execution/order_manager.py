@@ -1,4 +1,4 @@
-"""Place, cancel, and track orders via py-clob-client."""
+"""Place, cancel, and track orders via py-clob-client-v2."""
 
 from __future__ import annotations
 
@@ -9,17 +9,17 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
-from py_clob_client.clob_types import (  # type: ignore[import-untyped]  # no stubs available
+from py_clob_client_v2.clob_types import (  # type: ignore[import-untyped]  # no stubs available
     AssetType,
     BalanceAllowanceParams,
     MarketOrderArgs,
     OrderArgs,
     OrderType,
 )
-from py_clob_client.exceptions import (  # type: ignore[import-untyped]  # no stubs available
+from py_clob_client_v2.exceptions import (  # type: ignore[import-untyped]  # no stubs available
     PolyApiException,
 )
-from py_clob_client.order_builder.constants import (  # type: ignore[import-untyped]  # no stubs available
+from py_clob_client_v2.order_builder.constants import (  # type: ignore[import-untyped]  # no stubs available
     BUY,
     SELL,
 )
@@ -28,7 +28,7 @@ from shared.discord import send_bet_cancelled
 from utils.circuit_breaker import CircuitBreaker
 
 if TYPE_CHECKING:
-    from py_clob_client.client import (  # type: ignore[import-untyped]  # no stubs available
+    from py_clob_client_v2.client import (  # type: ignore[import-untyped]  # no stubs available
         ClobClient,
     )
 
@@ -643,7 +643,7 @@ class OrderManager:
         loop = asyncio.get_running_loop()
         try:
             # FOK orders require MarketOrderArgs + two-step flow per py-clob-client docs.
-            # ``side=BUY`` is mandatory in py_clob_client.clob_types.MarketOrderArgs;
+            # ``side=BUY`` is mandatory in py_clob_client_v2.clob_types.MarketOrderArgs;
             # omitting it raises TypeError at construction (post-mortem 2026-04-22 §5.1).
             # Every momentum entry is a BUY of the chosen outcome token; SELL exits go
             # through ``exit_position_early`` using OrderArgs, not this path.

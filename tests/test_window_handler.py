@@ -137,7 +137,7 @@ class FakeFeeTracker:
     def record_taker_fee(self, entry, shares):
         return self.compute_taker_fee(entry, shares)
 
-    async def fetch_fee_rate(self, session, url):
+    async def fetch_fee_rate(self, session, url, token_id=None):
         pass
 
 

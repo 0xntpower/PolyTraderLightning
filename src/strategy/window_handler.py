@@ -949,7 +949,14 @@ class WindowEventHandler:
             order_mgr.reset_window(window_info.window_ts)  # type: ignore[union-attr]  # mode=="paper" guarantees PaperOrderManager
 
         new_window_ts = window_info.window_ts
-        await self._fee_tracker.fetch_fee_rate(self._session, cfg.connections.clob_rest)
+        # V2 fee model is per-token; UP/DOWN of a binary market share the
+        # rate, so either id works. ``window_tracker`` may not have populated
+        # token ids yet during the very first window — fetch_fee_rate handles
+        # ``None`` by keeping the cached value (or the 200 bps default).
+        _fee_token = self._state.up_token_id or self._state.down_token_id
+        await self._fee_tracker.fetch_fee_rate(
+            self._session, cfg.connections.clob_rest, _fee_token,
+        )
 
         # Refresh on-chain balance for live mode
         if order_mgr.mode == "live":

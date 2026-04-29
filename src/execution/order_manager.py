@@ -68,6 +68,16 @@ _EARLY_EXIT_SHARE_HAIRCUT = 0.02
 # Share quantization on Polymarket CLOB: 1 microshare (1e-6).
 _SHARE_QUANTUM = 1e-6
 
+# Polymarket CLOB minimum order size (shares) for maker orders. Posting a
+# maker below this returns 400 with "Size (X) lower than the minimum: 5",
+# which costs a CLOB round-trip and increments the circuit breaker for a
+# trivially-pre-checkable condition (post-mortem 2026-04-23 §5.2).
+# Conservative hardcode: V2's ``get_clob_market_info`` exposes per-market
+# ``mos`` so this can be replaced with a dynamic lookup once we have a
+# dependable token_id → condition_id resolver. Until then, 5.0 matches
+# Polymarket's current global default and is safe at our bankroll scale.
+_MAKER_MIN_SHARES = 5.0
+
 
 def _parse_fak_filled_shares(resp: dict[str, Any]) -> float:
     """Extract filled share count from a CLOB post_order FAK response.
@@ -544,6 +554,21 @@ class OrderManager:
                 tier,
                 price,
                 best_ask,
+            )
+            return None
+
+        # Polymarket maker minimum: skip without round-trip if below threshold.
+        # Returning None drops the caller through to the taker path without
+        # incrementing the circuit breaker (record_failure is NOT called),
+        # which is correct — a too-small maker is our own pre-check, not a
+        # CLOB outage. See post-mortem 2026-04-23 §5.2.
+        size_shares = size_usd / price
+        if size_shares < _MAKER_MIN_SHARES:
+            log.info(
+                "%s maker skipped: size %.2f sh < CLOB min %.0f sh — falling through to taker",
+                tier,
+                size_shares,
+                _MAKER_MIN_SHARES,
             )
             return None
 

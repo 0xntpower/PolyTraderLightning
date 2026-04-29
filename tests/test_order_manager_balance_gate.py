@@ -238,3 +238,69 @@ def test_failed_place_does_not_debit_cached_balance(manager: OrderManager) -> No
     )
     assert order_id is None
     assert manager._cached_balance_usd == pytest.approx(100.0)
+
+
+# ---------------------------------------------------------------------------
+# Maker minimum-size pre-check (closes v3.6.2 §5.2)
+# ---------------------------------------------------------------------------
+
+
+def test_maker_skipped_when_size_below_clob_minimum(
+    manager: OrderManager,
+    tracker: PositionTracker,
+) -> None:
+    """Maker orders below 5 shares must be pre-empted before the CLOB
+    round-trip. Polymarket rejects them with HTTP 400 "Size (X) lower than
+    the minimum: 5", which costs a circuit-breaker increment and a wasted
+    API call. v3.6.2 lived with this for two sessions before the fix
+    landed (post-mortem 2026-04-23 §5.2).
+
+    At a $1.40 bet with price 0.75: size_shares = 1.87 < 5 -> skip.
+    The caller (momentum_signal._fire_with_retry) then drops through to
+    the taker path.
+    """
+    manager._cached_balance_usd = 100.0
+    manager.state.best_ask_up = 0.0  # let post-only check pass
+
+    order_id = asyncio.run(
+        manager.place_maker_order(
+            token_id=_TEST_TOKEN_ID,
+            price=0.75,
+            size_usd=1.40,
+            tier=_TEST_TIER,
+        ),
+    )
+
+    assert order_id is None
+    # Critical: the pre-check fires BEFORE add_exposure so no risk-tracker
+    # cleanup is needed and the circuit breaker is NOT incremented.
+    assert tracker.window_exposure_usd == pytest.approx(0.0)
+    manager.clob.create_and_post_order.assert_not_called()
+    # Cached balance untouched — pre-check returns before debit.
+    assert manager._cached_balance_usd == pytest.approx(100.0)
+
+
+def test_maker_allowed_when_size_meets_clob_minimum(
+    manager: OrderManager,
+    tracker: PositionTracker,
+) -> None:
+    """Boundary: size_shares == 5 IS allowed (strict <). Bet $4 at price
+    0.80 -> 5 shares exactly. The pre-check uses ``<``, so 5 sh passes.
+    Pin so a refactor to ``<=`` is caught.
+    """
+    manager._cached_balance_usd = 100.0
+    manager.state.best_ask_up = 0.0
+    manager.clob.create_and_post_order.return_value = {"orderID": "0xmin-boundary"}
+
+    order_id = asyncio.run(
+        manager.place_maker_order(
+            token_id=_TEST_TOKEN_ID,
+            price=0.80,
+            size_usd=4.00,
+            tier=_TEST_TIER,
+        ),
+    )
+
+    assert order_id == "0xmin-boundary"
+    assert tracker.window_exposure_usd == pytest.approx(4.00)
+    manager.clob.create_and_post_order.assert_called_once()

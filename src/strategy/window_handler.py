@@ -955,7 +955,9 @@ class WindowEventHandler:
         # ``None`` by keeping the cached value (or the 200 bps default).
         _fee_token = self._state.up_token_id or self._state.down_token_id
         await self._fee_tracker.fetch_fee_rate(
-            self._session, cfg.connections.clob_rest, _fee_token,
+            self._session,
+            cfg.connections.clob_rest,
+            _fee_token,
         )
 
         # Refresh on-chain balance for live mode

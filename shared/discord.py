@@ -23,6 +23,7 @@ import logging
 import os
 import queue
 import threading
+import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any  # Any: Discord webhook JSON payloads have mixed-type embed fields
@@ -595,9 +596,10 @@ def send_generated_signals(
     lines = ["```"]
     lines.append(
         f"{'#':<4} {'SIDE':<5} {'SCORE':>6} {'EV':>7} {'ENTRY':>6} {'WR':>5} "
-        f"{'CWR':>5} {'FOLDS':>6} {'OBI':>9}"
+        f"{'CWR':>5} {'FOLDS':>6} {'OBI':>9} {'AGE':>7}"
     )
-    lines.append("-" * 63)
+    lines.append("-" * 71)
+    now_ts = int(time.time())
     for sig in signals[:10]:
         side = sig.get("side", "?")[:4].upper()
         score = sig.get("_smart_score", sig.get("smartScore", 0))
@@ -609,9 +611,20 @@ def send_generated_signals(
         obi_t = float(sig.get("obiThreshold", 0.0) or 0.0)
         obi_d = str(sig.get("obiDepth", "none") or "none")
         obi_str = f"{obi_t:.2f}@{obi_d}" if obi_t > 0.0 else "off"
+        # Pool-anchored age = now - firstFireWindowTs.  '+' marks a saturated
+        # first fire (lower bound — signal may have been firing before the
+        # pool's oldest window).  "n/a" when the engine never populated it.
+        ff_ts_raw = sig.get("firstFireWindowTs")
+        if isinstance(ff_ts_raw, (int, float)) and ff_ts_raw > 0:
+            age_h = (now_ts - int(ff_ts_raw)) / 3600.0
+            sat = bool(sig.get("firstFireWindowSaturated", False))
+            age_str = f"{age_h:.1f}h{'+' if sat else ''}"
+        else:
+            age_str = "n/a"
         lines.append(
             f"{sig.get('rank', 0):<4} {side:<5} {score:>6.1f} {ev:>7.4f} "
-            f"${entry:>4.2f} {wr:>4.0f}% {cwr:>4.0f}% {folds:>6} {obi_str:>9}"
+            f"${entry:>4.2f} {wr:>4.0f}% {cwr:>4.0f}% {folds:>6} {obi_str:>9} "
+            f"{age_str:>7}"
         )
     lines.append("```")
     table = "\n".join(lines)

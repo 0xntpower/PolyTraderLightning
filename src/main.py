@@ -151,6 +151,14 @@ def _signal_cfg_to_dict(sc: MomentumSignalConfig) -> dict[str, Any]:
         "wfFoldsAppeared": sc.wf_folds_appeared,
         "wfTotalTestFolds": sc.wf_total_test_folds,
         "wfFoldIndices": sc.wf_fold_indices,
+        # v3.7 lifetime/age fields the orchestrator publishes over IPC.
+        # Surfaced here so the bot's SIGNAL_SWAP_ACTIVE log is the
+        # single source of truth for what the bot received per swap.
+        "signalAgeH": sc.signal_age_h,
+        "typicalLifetimeH": sc.typical_lifetime_h,
+        "typicalLifetimeSamples": sc.typical_lifetime_samples,
+        "typicalLifetimeStatus": sc.typical_lifetime_status,
+        "selectedOver": sc.selected_over,
     }
 
 

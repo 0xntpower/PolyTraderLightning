@@ -312,7 +312,7 @@ class TestSignalUpdate:
 
 
 # ---------------------------------------------------------------------------
-# status_query — v3.0 feedback channel
+# status_query — generic IPC feedback channel
 # ---------------------------------------------------------------------------
 
 
@@ -325,13 +325,7 @@ class TestStatusQuery:
 
         def provider() -> dict[str, Any]:
             call_count[0] += 1
-            return {
-                "recent_fires": [
-                    {"signal_id": "up_240_180", "won": True, "timestamp": "t1"},
-                    {"signal_id": "up_240_180", "won": False, "timestamp": "t2"},
-                ],
-                "mode": "paper",
-            }
+            return {"mode": "paper", "uptime_s": 3600}
 
         _, port = server_factory(status_provider=provider)
         _wait_for_port(port)
@@ -342,8 +336,7 @@ class TestStatusQuery:
         assert ack is not None
         assert call_count[0] == 1
         assert ack["mode"] == "paper"
-        assert len(ack["recent_fires"]) == 2
-        assert ack["recent_fires"][0]["signal_id"] == "up_240_180"
+        assert ack["uptime_s"] == 3600
         # The "type" field is stripped by query_status before returning.
         assert "type" not in ack
 
@@ -390,7 +383,7 @@ class TestStatusQuery:
             handler_calls.append((sig, summary))
 
         def provider() -> dict[str, Any]:
-            return {"recent_fires": [], "mode": "live"}
+            return {"mode": "live"}
 
         _, port = server_factory(handler, status_provider=provider)
         _wait_for_port(port)
@@ -444,7 +437,7 @@ def test_interleaved_signal_and_status_traffic(
             received.append(sig)
 
     def provider() -> dict[str, Any]:
-        return {"recent_fires": [], "mode": "paper"}
+        return {"mode": "paper"}
 
     _, port = server_factory(handler, status_provider=provider)
     _wait_for_port(port)

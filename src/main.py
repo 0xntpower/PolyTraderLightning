@@ -47,7 +47,7 @@ from shared.discord import (
 )
 from shared.pslagent import announce_alive, enroll_if_requested
 from shared.state_publisher import StatePublisher
-from shared.trade_journal import RecentFireMailbox, TradeJournal
+from shared.trade_journal import TradeJournal
 from strategy.kelly import KELLY_OUTCOME_WINDOW_SIZE, BankrollTracker
 from strategy.momentum_signal import MomentumSignalConfig, MomentumSignalStrategy
 from strategy.monitors import (
@@ -704,7 +704,6 @@ async def _strategy_loop(
     outcome_tracker: OutcomeTracker | None = None,
     fast_vol_tracker: EwmaVolatilityTracker | None = None,
     state_publisher: StatePublisher | None = None,
-    fire_mailbox: RecentFireMailbox | None = None,
 ) -> None:
     last_window_ts = 0
     gc_disabled = False
@@ -717,11 +716,7 @@ async def _strategy_loop(
     STALE_WARN_INTERVAL = 3600.0  # noqa: N806  # constant defined in function scope
     last_utc_date = datetime.now(UTC).date()
 
-    # Signal lifecycle tracking. The optional fire_mailbox is a shared
-    # in-memory ring buffer: when the journal records a resolved fire, it
-    # also pushes a RecentFire into the mailbox so the IPC status_query
-    # handler can answer without rereading the JSONL file from disk.
-    journal = TradeJournal(paths.journal, fire_mailbox=fire_mailbox)
+    journal = TradeJournal(paths.journal)
     lifecycle = SignalLifecycle()
 
     # SPRT decay detector
@@ -1277,17 +1272,6 @@ async def run(signal_path_override: str | None = None, standalone: bool = False)
     pending_signal_mgr: PendingSignalManager | None = None
     ipc_server = None
 
-    # v3.0 signal-identity dedupe feedback: an in-memory ring buffer of
-    # recently resolved fires, populated by the strategy loop's TradeJournal
-    # whenever it records a fired+resolved outcome. The IPC status_query
-    # handler reads a snapshot from here instead of rereading the JSONL file
-    # on disk, so the orchestrator's feedback channel never touches the hot
-    # path's I/O subsystem. Constructed unconditionally so _strategy_loop
-    # can always wire it into the journal; only the IPC handler actually
-    # reads from it.
-    fire_mailbox = RecentFireMailbox(maxlen=64)
-    _status_source = "paper" if cfg.is_paper else "live"
-
     if standalone:
         log.info("running in standalone mode — IPC disabled")
     else:
@@ -1303,25 +1287,10 @@ async def run(signal_path_override: str | None = None, standalone: bool = False)
             )
             pending_signal_mgr.set_pending(signal_data, summary_file)
 
-        def _status_provider() -> dict[str, Any]:
-            fires = fire_mailbox.snapshot(source=_status_source, limit=20)
-            return {
-                "recent_fires": [
-                    {
-                        "signal_id": f.signal_id,
-                        "won": f.won,
-                        "timestamp": f.timestamp,
-                    }
-                    for f in fires
-                ],
-                "mode": _status_source,
-            }
-
         ipc_server = SignalServer(
             _on_signal,
             host=cfg.ipc.host,
             port=cfg.ipc.port,
-            status_provider=_status_provider,
         )
         ipc_server.start()
 
@@ -1459,7 +1428,6 @@ async def run(signal_path_override: str | None = None, standalone: bool = False)
                 outcome_tracker=outcome_tracker,
                 fast_vol_tracker=fast_vol_tracker,
                 state_publisher=state_publisher,
-                fire_mailbox=fire_mailbox,
             ),
             name="strategy",
         )

@@ -255,6 +255,7 @@ def send_bet_placed(
     obi_threshold: float | None = None,
     obi_depth: str | None = None,
     obi_observed: float | None = None,
+    signal_age_h: float | None = None,
 ) -> bool:
     """Notify that a bet was submitted.
 
@@ -289,6 +290,8 @@ def send_bet_placed(
     ]
     if order_id:
         fields.append(_field("Order", f"`{order_id[:16]}`"))
+    if signal_age_h is not None:
+        fields.append(_field("Signal Age", f"`{signal_age_h:.1f}h`"))
     if obi_threshold is not None:
         if obi_threshold > 0.0 and obi_depth:
             gate = f"{obi_threshold:.2f}@{obi_depth}"

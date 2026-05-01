@@ -727,6 +727,7 @@ class MomentumSignalStrategy:
             obi_threshold=sc.obi_threshold,
             obi_depth=sc.obi_depth.value,
             obi_observed=self._latest_obi,
+            signal_age_h=sc.signal_age_h,
         )
 
     async def _monitor_maker_entry(

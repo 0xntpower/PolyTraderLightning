@@ -464,6 +464,7 @@ def send_early_exit(
     sell_price: float,
     pnl: float | None = None,
     balance: float | None = None,
+    signal_age_h: float | None = None,
 ) -> bool:
     """Notify that the bot sold a position early due to post-fire erosion."""
     is_paper = mode == "paper"
@@ -485,6 +486,8 @@ def send_early_exit(
     ]
     if pnl is not None:
         fields.append(_field("PnL", f"`${pnl:+.4f}`"))
+    if signal_age_h is not None:
+        fields.append(_field("Signal Age", f"`{signal_age_h:.1f}h`"))
     if balance is not None:
         fields.append(_field("Balance", f"`${balance:.2f}`"))
 
@@ -493,6 +496,108 @@ def send_early_exit(
         [
             _embed(
                 title=f"{tag} Early Exit",
+                colour=colour,
+                fields=fields,
+            )
+        ],
+    )
+
+
+def send_early_exit_postmortem(
+    *,
+    mode: str,
+    side: str,
+    rank: int,
+    market_outcome: str,
+    realized_pnl: float,
+    hypothetical_pnl: float,
+    entry_price: float,
+    sell_price: float,
+    erosion: float,
+    threshold: float,
+    fire_delta_pct: float,
+    current_delta_pct: float,
+    reason: str,
+    signal_age_at_fire_h: float | None = None,
+    typical_lifetime_h: float | None = None,
+    typical_lifetime_samples: int | None = None,
+    typical_lifetime_status: str = "unavailable",
+) -> bool:
+    """Postmortem on an early exit once the window resolves.
+
+    ``hypothetical_pnl`` is the PnL the bot would have realized had it held
+    the position to settlement. The "verdict" is CORRECT when realized > hypo
+    (the exit saved money) and WRONG when realized < hypo (it missed upside).
+    The erosion/threshold pair is the trigger snapshot at exit time —
+    overshoot = ``erosion - threshold`` is the exact amount the threshold
+    would need to rise to skip this exit (when wrong) or fall to still
+    trigger it (when right).
+    """
+    is_paper = mode == "paper"
+    url = _url("DISCORD_WEBHOOK_PAPER_BETS" if is_paper else "DISCORD_WEBHOOK_LIVE_BETS")
+    tag = "PAPER" if is_paper else "LIVE"
+
+    held_won = market_outcome == side
+    delta = realized_pnl - hypothetical_pnl
+    correct_exit = delta >= 0
+    verdict = "CORRECT" if correct_exit else "WRONG"
+    colour = _GREEN if correct_exit else _RED
+
+    overshoot = erosion - threshold
+    if correct_exit:
+        tuning = (
+            f"Erosion exceeded threshold by `{overshoot:+.4f}` — could tighten "
+            f"threshold down to `{erosion:.4f}` and still have triggered."
+        )
+    else:
+        tuning = (
+            f"Erosion exceeded threshold by `{overshoot:+.4f}` — raising "
+            f"threshold above `{erosion:.4f}` would have prevented this exit."
+        )
+
+    if correct_exit:
+        description = (
+            f"Holding would have **{'WON' if held_won else 'LOST'}**. "
+            f"Exit **saved** `${delta:+.4f}`."
+        )
+    else:
+        description = (
+            f"Holding would have **{'WON' if held_won else 'LOST'}**. "
+            f"Exit **missed** `${-delta:+.4f}`."
+        )
+
+    fields = [
+        _field("Verdict", f"`{verdict}`"),
+        _field("Side", f"`{side.upper()}`"),
+        _field("Market", f"`{market_outcome.upper()}`"),
+        _field("Signal", f"`#{rank}`"),
+        _field("Realized PnL", f"`${realized_pnl:+.4f}`"),
+        _field("Hypothetical PnL", f"`${hypothetical_pnl:+.4f}`"),
+        _field("Saved" if correct_exit else "Missed", f"`${abs(delta):.4f}`"),
+        _field("Entry / Sell", f"`{entry_price:.2f}` → `{sell_price:.2f}`"),
+        _field("Erosion / Threshold", f"`{erosion:.4f}` / `{threshold:.4f}`"),
+        _field("Fire → Current Delta", f"`{fire_delta_pct:+.4f}%` → `{current_delta_pct:+.4f}%`"),
+        _field("Exit Reason", f"`{reason}`", inline=False),
+        _field("Tuning", tuning, inline=False),
+    ]
+    if signal_age_at_fire_h is not None:
+        fields.append(_field("Signal Age at Fire", f"`{signal_age_at_fire_h:.1f}h`"))
+    if typical_lifetime_h is not None:
+        n_suffix = f", n={typical_lifetime_samples}" if typical_lifetime_samples is not None else ""
+        status_suffix = ", tentative" if typical_lifetime_status == "tentative" else ""
+        fields.append(
+            _field(
+                "Typical Lifetime",
+                f"`{typical_lifetime_h:.1f}h (median{n_suffix}{status_suffix})`",
+            )
+        )
+
+    return _send(
+        url,
+        [
+            _embed(
+                title=f"{tag} Early Exit Postmortem — {verdict}",
+                description=description,
                 colour=colour,
                 fields=fields,
             )

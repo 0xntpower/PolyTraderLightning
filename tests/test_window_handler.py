@@ -264,6 +264,9 @@ class FakePaperRecord:
         self.pnl_total = pnl
         self.rule_entry_price = entry_price
         self.rule_simulated_fill = filled
+        self.early_exit = False
+        self.early_exit_sell_price = None
+        self.actual_outcome = None
 
 
 class FakeOrderManager:
@@ -300,6 +303,7 @@ class FakeStrategy:
         self.erosion_cfg = None
         self.warmup_active = False
         self._reset_called = False
+        self._exit_telemetry = None
 
     def reset(self):
         self._reset_called = True

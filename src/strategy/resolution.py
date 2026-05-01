@@ -83,6 +83,14 @@ class PendingResolution:
     early_exit_sell_price: float | None = None
     early_exit_residual_shares: float = 0.0
     early_exit_residual_entry: float = 0.0
+    # Trigger snapshot at exit time, mirrored from MomentumSignalStrategy.
+    # Carried so the postmortem Discord embed can show how far erosion
+    # overshot the threshold once the market resolves.
+    early_exit_erosion: float | None = None
+    early_exit_threshold: float | None = None
+    early_exit_reason: str | None = None
+    early_exit_fire_delta_pct: float | None = None
+    early_exit_current_delta_pct: float | None = None
     # True if the originating entry order was maker (post-only GTC). Maker
     # entries pay no taker fee at entry, so _resolve skips the fee deduction.
     # For combined maker+taker entries this is False and the fee breakdown
@@ -204,6 +212,11 @@ class ResolutionManager:
         early_exit_sell_price: float | None = None,
         early_exit_residual_shares: float = 0.0,
         early_exit_residual_entry: float = 0.0,
+        early_exit_erosion: float | None = None,
+        early_exit_threshold: float | None = None,
+        early_exit_reason: str | None = None,
+        early_exit_fire_delta_pct: float | None = None,
+        early_exit_current_delta_pct: float | None = None,
         is_maker_entry: bool = False,
         maker_usd: float = 0.0,
         taker_usd: float = 0.0,
@@ -250,6 +263,11 @@ class ResolutionManager:
             early_exit_sell_price=early_exit_sell_price,
             early_exit_residual_shares=early_exit_residual_shares,
             early_exit_residual_entry=early_exit_residual_entry,
+            early_exit_erosion=early_exit_erosion,
+            early_exit_threshold=early_exit_threshold,
+            early_exit_reason=early_exit_reason,
+            early_exit_fire_delta_pct=early_exit_fire_delta_pct,
+            early_exit_current_delta_pct=early_exit_current_delta_pct,
             is_maker_entry=is_maker_entry,
             maker_usd=maker_usd,
             taker_usd=taker_usd,
@@ -603,8 +621,11 @@ class ResolutionManager:
             balance=self._bankroll_tracker.bankroll,
         )
 
-        # Discord notification — skip for early exits, since momentum_signal
-        # already fired send_early_exit at the time of the sell.
+        # Discord notification — skip the WIN/LOSS embed for early exits,
+        # since momentum_signal already fired send_early_exit at the time
+        # of the sell. Instead, fire the postmortem so the user can see
+        # whether the exit decision was correct now that the market has
+        # resolved.
         if not is_early_exit:
             from shared.discord import send_bet_result
 
@@ -625,6 +646,41 @@ class ResolutionManager:
                 typical_lifetime_status=pr.typical_lifetime_status,
                 obi_threshold=sc.obi_threshold,
                 obi_depth=sc.obi_depth.value,
+            )
+        elif (
+            pr.early_exit_erosion is not None
+            and pr.early_exit_threshold is not None
+            and pr.early_exit_reason is not None
+            and pr.early_exit_fire_delta_pct is not None
+            and pr.early_exit_current_delta_pct is not None
+        ):
+            # Hypothetical pnl had we held — gross-of-entry-fee, matching
+            # the accounting in the early-exit branch above. Entry fee
+            # cancels out of the realized-vs-hypothetical delta either way.
+            held_won = outcome == sc.side.value
+            hypothetical_pnl = round(
+                shares * (1.0 - entry_price) if held_won else -(shares * entry_price), 4
+            )
+            from shared.discord import send_early_exit_postmortem
+
+            send_early_exit_postmortem(
+                mode=mode,
+                side=sc.side.value,
+                rank=sc.rank,
+                market_outcome=outcome,
+                realized_pnl=pnl,
+                hypothetical_pnl=hypothetical_pnl,
+                entry_price=entry_price,
+                sell_price=pr.early_exit_sell_price or 0.0,
+                erosion=pr.early_exit_erosion,
+                threshold=pr.early_exit_threshold,
+                fire_delta_pct=pr.early_exit_fire_delta_pct,
+                current_delta_pct=pr.early_exit_current_delta_pct,
+                reason=pr.early_exit_reason,
+                signal_age_at_fire_h=pr.signal_age_at_fire_h,
+                typical_lifetime_h=pr.typical_lifetime_h,
+                typical_lifetime_samples=pr.typical_lifetime_samples,
+                typical_lifetime_status=pr.typical_lifetime_status,
             )
 
         # Journal record

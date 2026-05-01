@@ -406,6 +406,44 @@ class WindowEventHandler:
             elif pnl < 0:
                 won = False
 
+            # Early-exit postmortem (paper) — fires once the window's
+            # actual outcome is known so the user can see whether selling
+            # mid-window saved or cost money. Live's equivalent fires
+            # from resolution._resolve via PendingResolution.
+            if (
+                rec.early_exit
+                and rec.actual_outcome
+                and entry_price > 0
+                and strategy._exit_telemetry is not None
+            ):
+                tel = strategy._exit_telemetry
+                shares = strategy.last_size_usd / entry_price
+                held_won = rec.actual_outcome == sc.side.value
+                hypothetical_pnl = round(
+                    shares * (1.0 - entry_price) if held_won else -(shares * entry_price), 4
+                )
+                from shared.discord import send_early_exit_postmortem
+
+                send_early_exit_postmortem(
+                    mode="paper",
+                    side=sc.side.value,
+                    rank=sc.rank,
+                    market_outcome=rec.actual_outcome,
+                    realized_pnl=pnl,
+                    hypothetical_pnl=hypothetical_pnl,
+                    entry_price=entry_price,
+                    sell_price=rec.early_exit_sell_price or 0.0,
+                    erosion=tel["erosion"],
+                    threshold=tel["threshold"],
+                    fire_delta_pct=tel["fire_delta_pct"],
+                    current_delta_pct=tel["current_delta_pct"],
+                    reason=tel["reason"],
+                    signal_age_at_fire_h=sc.signal_age_h,
+                    typical_lifetime_h=sc.typical_lifetime_h,
+                    typical_lifetime_samples=sc.typical_lifetime_samples,
+                    typical_lifetime_status=sc.typical_lifetime_status,
+                )
+
         # Live mode: actual fill(s) from CLOB user WebSocket
         elif not is_paper and _live_filled:
             _total_size_usd = sum(f.size_usd for f in _live_buy_fills)
@@ -480,6 +518,31 @@ class WindowEventHandler:
                     early_exit_pnl=_early_exit[1] if _early_exit is not None else None,
                     early_exit_residual_shares=_early_exit[2] if _early_exit is not None else 0.0,
                     early_exit_residual_entry=_early_exit[3] if _early_exit is not None else 0.0,
+                    early_exit_erosion=(
+                        strategy._exit_telemetry["erosion"]
+                        if strategy._exit_telemetry is not None
+                        else None
+                    ),
+                    early_exit_threshold=(
+                        strategy._exit_telemetry["threshold"]
+                        if strategy._exit_telemetry is not None
+                        else None
+                    ),
+                    early_exit_reason=(
+                        strategy._exit_telemetry["reason"]
+                        if strategy._exit_telemetry is not None
+                        else None
+                    ),
+                    early_exit_fire_delta_pct=(
+                        strategy._exit_telemetry["fire_delta_pct"]
+                        if strategy._exit_telemetry is not None
+                        else None
+                    ),
+                    early_exit_current_delta_pct=(
+                        strategy._exit_telemetry["current_delta_pct"]
+                        if strategy._exit_telemetry is not None
+                        else None
+                    ),
                     is_maker_entry=_is_maker_entry,
                     maker_usd=_maker_usd,
                     taker_usd=_taker_usd,

@@ -20,7 +20,7 @@ import math
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 from shared.discord import send_bet_placed, send_early_exit
 from strategy.kelly import AdjustedWinRateResult, KellyResult, conservative_win_rate, kelly_size
@@ -113,6 +113,21 @@ class MomentumSignalConfig:
         return conservative_win_rate(self.oos_win_rate_pct, self.oos_matches, max_shrink_pct)
 
 
+class EarlyExitTelemetry(TypedDict):
+    """Trigger snapshot captured at the moment ``exit_position_early`` fired.
+
+    Carried forward to the postmortem Discord notification so operators can
+    see by how much the erosion exceeded the threshold (the exact tuning
+    knob delta needed to flip the decision) once the window resolves.
+    """
+
+    erosion: float
+    threshold: float
+    reason: str
+    fire_delta_pct: float
+    current_delta_pct: float
+
+
 class MomentumSignalStrategy:
     """Evaluates a MomentumSignalConfig against live tick data each strategy tick.
 
@@ -182,6 +197,11 @@ class MomentumSignalStrategy:
         # Post-fire erosion monitoring
         self._fire_delta_pct: float = 0.0  # bn_direction_from_open_pct * 100 at fire time
         self._early_exit_triggered: bool = False
+        # Trigger snapshot at the moment ``exit_position_early`` actually
+        # fires (skipped on the no-bid path where no sell happens). Read by
+        # window_handler at window-end and shipped to the postmortem Discord
+        # embed so the user can see how far erosion overshot the threshold.
+        self._exit_telemetry: EarlyExitTelemetry | None = None
         # CUSUM erosion detector state
         self._erosion_ema: float = 0.0
         self._erosion_cusum: float = 0.0
@@ -627,6 +647,7 @@ class MomentumSignalStrategy:
                 current_delta_pct=current_pct,
                 entry_price=self.last_entry_price,
                 sell_price=0.0,
+                signal_age_h=sc.signal_age_h,
             )
             return
 
@@ -645,6 +666,13 @@ class MomentumSignalStrategy:
             reason,
         )
         pnl = await order_mgr.exit_position_early(sell_price)
+        self._exit_telemetry = EarlyExitTelemetry(
+            erosion=erosion,
+            threshold=threshold,
+            reason=reason,
+            fire_delta_pct=fire_delta,
+            current_delta_pct=current_pct,
+        )
         send_early_exit(
             mode=order_mgr.mode,
             side=sc.side.value,
@@ -657,6 +685,7 @@ class MomentumSignalStrategy:
             entry_price=self.last_entry_price,
             sell_price=sell_price,
             pnl=pnl,
+            signal_age_h=sc.signal_age_h,
         )
 
     # ------------------------------------------------------------------

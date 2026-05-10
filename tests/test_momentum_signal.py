@@ -570,13 +570,19 @@ class _FakeErosionOrderMgr:
     """Minimal OrderExecutor for post-fire erosion monitoring tests.
 
     Records calls to exit_position_early so tests can assert whether the
-    CUSUM path actually fired an exit.
+    CUSUM path actually fired an exit. ``has_filled_buys`` defaults to True
+    so existing CUSUM tests run as if the entry's WS confirmation has landed
+    (the H-cusum-pre-fill guard is exercised separately).
     """
 
     mode = "paper"
 
-    def __init__(self) -> None:
+    def __init__(self, *, has_buys: bool = True) -> None:
         self.exit_calls: list[float] = []
+        self._has_buys = has_buys
+
+    def has_filled_buys(self) -> bool:
+        return self._has_buys
 
     async def exit_position_early(self, sell_price: float) -> float:
         self.exit_calls.append(sell_price)
@@ -1310,6 +1316,62 @@ class TestCusumOverride:
         _patch_erosion_env(monkeypatch, clock)
 
         sig = _make_signal(bn_direction_from_open_pct=0.0095)
+        await strategy._monitor_post_fire_erosion(sig, order_mgr)
+
+        assert strategy._early_exit_triggered
+        assert len(order_mgr.exit_calls) == 1
+
+
+class TestCusumPreFillGuard:
+    """Post-mortem 2026-05-09 §6 H-cusum-pre-fill / T11.
+
+    The strategy marks ``_entry_complete=True`` the moment the CLOB ack returns
+    from ``place_taker_order``, but the user-WS trade event for the fill can
+    lag 1-2 s. If CUSUM crosses its override threshold inside that gap, the
+    SELL has nothing to sell. The guard defers (does NOT latch
+    ``_early_exit_triggered``) so CUSUM can re-fire once the WS confirms.
+    """
+
+    @pytest.mark.asyncio
+    async def test_defers_when_no_filled_buys(self, monkeypatch):
+        """No confirmed BUY fills yet — exit should defer, flag stays False."""
+        strategy, _ = _prime_erosion_state(best_bid_up=0.20)
+        # Override-magnitude breach so we know suppressions wouldn't block it.
+        strategy.erosion_cfg = ErosionConfig(
+            cusum_min_reversal_pp=0.15,
+            cusum_suppress_top_bid=0.85,
+            cusum_override_multiplier=2.0,
+        )
+        strategy._cusum_breach_started_at = 0.0
+        strategy._erosion_cusum = 1.80
+        order_mgr = _FakeErosionOrderMgr(has_buys=False)
+        clock = _Clock(start=1000.0)
+        _patch_erosion_env(monkeypatch, clock)
+
+        sig = _make_signal(bn_direction_from_open_pct=0.0)
+        await strategy._monitor_post_fire_erosion(sig, order_mgr)
+
+        # Critical: no exit attempted, flag NOT latched (so CUSUM can re-fire).
+        assert not strategy._early_exit_triggered
+        assert order_mgr.exit_calls == []
+
+    @pytest.mark.asyncio
+    async def test_fires_once_buys_confirmed(self, monkeypatch):
+        """With BUY fills present the override fires normally — guard is
+        scoped to the pre-fill window, not a permanent gate."""
+        strategy, _ = _prime_erosion_state(best_bid_up=0.20)
+        strategy.erosion_cfg = ErosionConfig(
+            cusum_min_reversal_pp=0.15,
+            cusum_suppress_top_bid=0.85,
+            cusum_override_multiplier=2.0,
+        )
+        strategy._cusum_breach_started_at = 0.0
+        strategy._erosion_cusum = 1.80
+        order_mgr = _FakeErosionOrderMgr(has_buys=True)
+        clock = _Clock(start=1000.0)
+        _patch_erosion_env(monkeypatch, clock)
+
+        sig = _make_signal(bn_direction_from_open_pct=0.0)
         await strategy._monitor_post_fire_erosion(sig, order_mgr)
 
         assert strategy._early_exit_triggered

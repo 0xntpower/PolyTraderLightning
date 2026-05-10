@@ -84,6 +84,17 @@ class OrderExecutor(Protocol):
         """
         ...
 
+    def has_filled_buys(self) -> bool:
+        """True when at least one BUY fill is confirmed for the current window.
+
+        Used by ``MomentumSignalStrategy._execute_early_exit`` to defer a CUSUM
+        exit when the entry order's WS fill confirmation hasn't arrived yet —
+        otherwise the exit no-ops on an empty position and ``_early_exit_triggered``
+        latches True, leaving the unfilled entry on-book until window-close
+        cancel sweep (post-mortem 2026-05-09 §6 H-cusum-pre-fill, T11).
+        """
+        ...
+
     def set_rule_triggered(
         self,
         rule_id: int,

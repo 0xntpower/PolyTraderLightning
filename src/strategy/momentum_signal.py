@@ -620,9 +620,55 @@ class MomentumSignalStrategy:
         reason: str,
     ) -> None:
         """Sell the position and send notifications for an early exit."""
-        self._early_exit_triggered = True
         sc = self.signal_cfg
+
+        # H-cusum-pre-fill guard (post-mortem 2026-05-09 §6, T11). The strategy
+        # marks _entry_complete=True the moment the CLOB ack returns, but the
+        # user-WS trade event for the fill can lag 1-2 s. If CUSUM crosses its
+        # override threshold inside that gap, the SELL has nothing to sell and
+        # exit_position_early no-ops. Without this guard _early_exit_triggered
+        # latched True anyway, leaving the unfilled BUY on-book until window
+        # close (where pre-§5.1 it crashed cancel_all_active). Returning
+        # without setting the flag lets CUSUM re-fire once the WS confirms.
+        if not order_mgr.has_filled_buys():
+            log.info(
+                "EARLY EXIT DEFERRED (entry not yet WS-confirmed): rank=%d side=%s "
+                "erosion=%.4f threshold=%.4f cusum=%.3f fire=%.4f%% current=%.4f%% "
+                "reason=%s",
+                sc.rank,
+                sc.side.value,
+                erosion,
+                threshold,
+                self._erosion_cusum,
+                fire_delta,
+                current_pct,
+                reason,
+            )
+            return
+
+        self._early_exit_triggered = True
         sell_price = self.state.best_bid_up if sc.side == Direction.UP else self.state.best_bid_down
+
+        # H-exit-slip-1 instrumentation (post-mortem 2026-05-09 §5.2). 4 of 12
+        # FAK SELLs in v3.6.4-s2 were rejected for "no orders found to match"
+        # because state.best_bid_up was stale by the time the FAK arrived at
+        # the venue. Capture the full book snapshot at quote time so a future
+        # session can compare to the bid observed at FAK arrival and decide
+        # between walk-the-bid (Option A) vs refresh-before-post (Option B).
+        log.info(
+            "EARLY EXIT QUOTE: rank=%d side=%s sell_price=%.4f "
+            "best_bid_up=%.4f best_ask_up=%.4f best_bid_down=%.4f best_ask_down=%.4f "
+            "cusum=%.3f erosion=%.4f",
+            sc.rank,
+            sc.side.value,
+            sell_price,
+            self.state.best_bid_up,
+            self.state.best_ask_up,
+            self.state.best_bid_down,
+            self.state.best_ask_down,
+            self._erosion_cusum,
+            erosion,
+        )
 
         if sell_price <= 0:
             log.warning(

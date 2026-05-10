@@ -14,6 +14,7 @@ from py_clob_client_v2.clob_types import (  # type: ignore[import-untyped]  # no
     BalanceAllowanceParams,
     MarketOrderArgs,
     OrderArgs,
+    OrderPayload,
     OrderType,
 )
 from py_clob_client_v2.exceptions import (  # type: ignore[import-untyped]  # no stubs available
@@ -455,6 +456,16 @@ class OrderManager:
         intended_usd = float(intent["size_usd"])
         return fill.size_usd >= intended_usd - _FILL_TOLERANCE_USD
 
+    def has_filled_buys(self) -> bool:
+        """True when at least one BUY fill is in ``state.live_fills`` for this window.
+
+        ``live_fills`` is cleared at window reset (`market_data.state:222`), so
+        this is naturally window-scoped. CUSUM uses this to defer early-exit
+        when the entry's CLOB ack came back but the user-WS trade event for
+        the fill hasn't landed yet — typical 1-2 s gap on FOK takers.
+        """
+        return any(f.side == "BUY" for f in self.state.live_fills.values())
+
     async def cancel_order(self, order_id: str) -> bool:
         """Cancel a single order by ID.
 
@@ -470,10 +481,15 @@ class OrderManager:
 
         loop = asyncio.get_running_loop()
         try:
+            # py-clob-client V2 renamed ``cancel(order_id: str)`` to
+            # ``cancel_order(OrderPayload(orderID=...))``. The V1 name lingered
+            # in the V1→V2 swap and crashed the strategy loop on the first
+            # session window where an unfilled order survived to window close
+            # (post-mortem 2026-05-09 §5.1, T11).
             await asyncio.wait_for(
                 loop.run_in_executor(
                     self._clob_exec,
-                    partial(self.clob.cancel, order_id),
+                    partial(self.clob.cancel_order, OrderPayload(orderID=order_id)),
                 ),
                 timeout=_CLOB_CALL_TIMEOUT_SEC,
             )
@@ -752,7 +768,7 @@ class OrderManager:
                     await asyncio.wait_for(
                         loop.run_in_executor(
                             self._clob_exec,
-                            partial(self.clob.cancel, order_id),
+                            partial(self.clob.cancel_order, OrderPayload(orderID=order_id)),
                         ),
                         timeout=_CLOB_CALL_TIMEOUT_SEC,
                     )

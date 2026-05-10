@@ -182,6 +182,16 @@ class PaperOrderManager:
         """Check if a paper order has been filled. Paper has no partial state."""
         return any(o.order_id == order_id and o.filled for o in self._orders)
 
+    def has_filled_buys(self) -> bool:
+        """True when at least one paper BUY order has filled this window.
+
+        ``_orders`` is cleared at ``reset_window`` and only ever holds entry
+        BUYs (paper ``exit_position_early`` computes pnl directly without
+        adding a SELL order), so any filled order in the list is a confirmed
+        BUY for this window. Mirrors the live-side semantic.
+        """
+        return any(o.filled for o in self._orders)
+
     async def cancel_order(self, order_id: str) -> bool:
         """Cancel a single paper order. Returns True if cancelled."""
         assert self.risk.tracker is not None  # noqa: S101  # set in RiskRegistry.from_config()

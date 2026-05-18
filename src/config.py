@@ -358,8 +358,8 @@ class PaperConfig:
 
 @dataclass(frozen=True, slots=True)
 class IpcConfig:
-    # Defaults match the VPS Tailscale setup so a fresh config.yml on the
-    # VPS works without manual edits. Override for other machines.
+    # Defaults match the winlab Tailscale setup so a fresh config.yml on
+    # winlab works without manual edits. Override for other machines.
     host: str = "127.0.0.1"
     port: int = 19731
     stale_signal_warning_hours: float = 6.0

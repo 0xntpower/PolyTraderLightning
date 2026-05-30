@@ -1,0 +1,60 @@
+PolySignalLab Source-Available License v1.0
+Copyright (c) 2026 0xntpower
+
+1. DEFINITIONS
+   "Software"     — the contents of this repository, in whole or in part.
+   "Author"       — 0xntpower, the copyright holder, reachable at contact@ntpower.dev.
+   "You"          — any individual or entity exercising rights under this License.
+   "Modification" — any change, addition, enhancement, optimization, adaptation,
+                    or derivative work based on the Software, in source or binary form.
+   "Use"          — to run, execute, deploy, or operate the Software or a Modification —
+                    including internally, in production, for commercial purposes, or as a
+                    hosted / network-accessible service.
+
+2. GRANT
+   Subject to the conditions below, the Author grants You a worldwide, royalty-free,
+   non-exclusive license to use, copy, modify, and distribute the Software and any
+   Modification, INCLUDING FOR COMMERCIAL PURPOSES.
+
+3. MANDATORY MODIFICATION DISCLOSURE  (the core condition)
+   If You Use any Modification, then within sixty (60) days of first such Use You must
+   provide the Author with:
+     (a) the complete corresponding source code of Your Modifications — the changed and
+         added files, sufficient for the Author to build and understand them; and
+     (b) a plain-language description of what the Modifications do and the improvement,
+         advantage, or commercial benefit they provide.
+
+   Disclosing privately to the Author SATISFIES this obligation in full. You are NOT
+   required to publish Your Modifications, release them to the public, make them open
+   source, or share them with anyone other than the Author.
+
+   This obligation applies whether or not You distribute the Modifications, and whether
+   the Modifications are used only internally or offered to third parties as a service.
+
+   Disclosure must be sent to the Author at contact@ntpower.dev (or any address the
+   Author designates in this repository).
+
+4. GRANT-BACK
+   For Modifications You disclose under Section 3, You grant the Author a worldwide,
+   royalty-free, non-exclusive, perpetual, irrevocable license to use, reproduce, modify,
+   and incorporate those Modifications into the Software and to relicense them under this
+   License. You retain ownership of and all other rights in Your Modifications.
+
+5. NOTICES
+   You must retain this License, the copyright notice, and attribution to the Author in
+   all copies and substantial portions of the Software.
+
+6. NO TRADEMARK RIGHTS
+   This License grants no rights to the Author's names, logos, or trademarks.
+
+7. TERMINATION
+   Any breach of Section 3 or Section 5 automatically terminates Your rights under this
+   License. Rights are reinstated if You cure the breach within thirty (30) days of
+   becoming aware of it.
+
+8. DISCLAIMER OF WARRANTY AND LIABILITY
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+   INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+   PARTICULAR PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+   ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN CONTRACT, TORT, OR OTHERWISE,
+   ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR ITS USE.

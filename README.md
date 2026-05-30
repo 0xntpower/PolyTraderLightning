@@ -25,3 +25,7 @@ See `docs/infrastructure/vps_deployment.md` for full deployment details.
 ## Shared Library
 
 The `shared/` directory contains modules used across the entire PolySignalLab system: IPC protocol, Discord notifications, signal ranking, risk management, decay detection, and configuration utilities.
+
+## License
+
+Source-available under the **PolySignalLab Source-Available License v1.0** — see [LICENSE](LICENSE). Commercial use is permitted, but if you use a modified version you must disclose your modifications to the author (privately is fine — public release is not required). See the LICENSE for the exact terms.

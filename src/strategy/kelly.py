@@ -85,11 +85,12 @@ def wilson_lower_bound(wins: int, n: int) -> float:
     expensive entries (entry > ~0.93) for typical sample sizes, while
     preserving edge on cheap entries with strong signals.
 
-    Examples (z=1.5):
-        16/16  → 93.6%   (observed 100%, shrink 6.4%)
-        29/30  → 92.7%   (observed 96.7%, shrink 4.0%)
-        50/50  → 96.4%   (observed 100%, shrink 3.6%)
-        87/100 → 82.8%   (observed 87%, shrink 4.2%)
+    Examples (z=1.5, raw lower bound — the 3pp shrink cap is applied separately
+    in ``conservative_win_rate``, not here):
+        16/16  → 87.7%   (observed 100%,   shrink 12.3pp)
+        29/30  → 87.7%   (observed 96.7%,  shrink 9.0pp)
+        50/50  → 95.7%   (observed 100%,   shrink 4.3pp)
+        87/100 → 81.1%   (observed 87%,    shrink 5.9pp)
     """
     if n <= 0:
         return 0.5

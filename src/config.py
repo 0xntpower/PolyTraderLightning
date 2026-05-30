@@ -358,8 +358,9 @@ class PaperConfig:
 
 @dataclass(frozen=True, slots=True)
 class IpcConfig:
-    # Defaults match the winlab Tailscale setup so a fresh config.yml on
-    # winlab works without manual edits. Override for other machines.
+    # Loopback defaults so the bot runs out-of-the-box on a single host.
+    # Point host/visualizer_host at your orchestrator + visualizer (e.g. a
+    # LAN/VPN address) in config.yml when running them on separate machines.
     host: str = "127.0.0.1"
     port: int = 19731
     stale_signal_warning_hours: float = 6.0

@@ -925,3 +925,60 @@ class TestCreatePendingForceResolves:
         # New pending should now be the second one
         assert mgr.is_pending
         assert mgr.pending.window_ts == 2000
+
+
+# ---------------------------------------------------------------------------
+# Cumulative state across multiple resolutions (ported from the deleted
+# root tests/test_strategy_integration.py TestConsecutiveResolutions, which
+# drove the now-gone _process_live_resolution free function directly against
+# SignalLifecycleState. Rewritten here against the current ResolutionManager,
+# driven through force_resolve the same way TestBookkeeping does.)
+# ---------------------------------------------------------------------------
+
+
+class TestConsecutiveResolutions:
+    @patch("shared.discord.send_live_wr_checkpoint")
+    @patch("shared.discord.send_bet_result")
+    def test_alternating_wins_losses(self, mock_bet, mock_wr, resolution_env):
+        mgr = resolution_env["mgr"]
+        pt = resolution_env["position_tracker"]
+        journal = resolution_env["journal"]
+        decay = resolution_env["decay_detector"]
+        recent_outcomes = resolution_env["recent_outcomes"]
+
+        # FakeDecayDetector starts at _n_trades=5, _n_wins=0 (see FakeDecayDetector
+        # default args above), so assert the delta rather than an absolute count.
+        trades_before = decay._n_trades
+        wins_before = decay._n_wins
+
+        outcomes = ["up", "down", "up", "down", "up"]  # W L W L W
+        total_pnl = 0.0
+        for i, outcome in enumerate(outcomes):
+            _create_pending(mgr, side=Direction.UP, slug=f"btc-{i}", snapshot_outcome=outcome)
+            result = mgr.force_resolve(context="test", signal_id="test")
+            total_pnl += result.pnl
+
+        assert decay._n_trades - trades_before == 5
+        assert decay._n_wins - wins_before == 3
+        assert len(recent_outcomes) == 5
+        assert sum(recent_outcomes) == 3
+        assert len(pt.records) == 5
+        assert pt.total_pnl == pytest.approx(total_pnl, abs=0.01)
+        assert len(journal.trades) == 5
+        assert sum(1 for r in journal.trades if r.won) == 3
+
+    @patch("shared.discord.send_live_wr_checkpoint")
+    @patch("shared.discord.send_bet_result")
+    def test_bankroll_converges_to_expected(self, mock_bet, mock_wr, resolution_env):
+        """After N trades, bankroll should equal initial + sum(pnls)."""
+        mgr = resolution_env["mgr"]
+        bt = resolution_env["bankroll_tracker"]
+
+        cumulative_pnl = 0.0
+        for i in range(10):
+            outcome = "up" if i % 3 != 0 else "down"  # ~67% WR
+            _create_pending(mgr, side=Direction.UP, slug=f"btc-{i}", snapshot_outcome=outcome)
+            result = mgr.force_resolve(context="test", signal_id="test")
+            cumulative_pnl += result.pnl
+
+        assert bt.bankroll == pytest.approx(1000.0 + cumulative_pnl, abs=0.1)

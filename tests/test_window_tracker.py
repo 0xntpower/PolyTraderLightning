@@ -122,6 +122,72 @@ class TestFetchMarketResolution:
 
         assert result is None
 
+    # -- price-threshold boundary and malformed-price handling (relocated from
+    # -- PolySignalLab root tests/test_resolution.py, rewritten against the
+    # -- real fetch_market_resolution instead of a hand-copied parsing helper)
+
+    @pytest.mark.asyncio
+    async def test_resolves_at_exact_threshold(self):
+        """0.99 is the >= boundary — must still resolve."""
+        session = MagicMock()
+        body = _make_events_response("resolved", ["Up", "Down"], ["0.99", "0.01"])
+        session.get = MagicMock(return_value=_FakeResponse(200, body))
+
+        tracker = _make_tracker(session)
+        result = await tracker.fetch_market_resolution("btc-updown-5m-1775650800")
+
+        assert result is not None
+        assert result.outcome == "up"
+
+    @pytest.mark.asyncio
+    async def test_below_threshold_resolved_status_returns_none(self):
+        """0.98 is below the 0.99 threshold — resolved status alone isn't enough."""
+        session = MagicMock()
+        body = _make_events_response("resolved", ["Up", "Down"], ["0.98", "0.02"])
+        session.get = MagicMock(return_value=_FakeResponse(200, body))
+
+        tracker = _make_tracker(session)
+        result = await tracker.fetch_market_resolution("btc-updown-5m-1775650800")
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_invalid_price_value_skipped(self):
+        """A non-numeric price is skipped, not a crash — next price still resolves."""
+        session = MagicMock()
+        body = _make_events_response("resolved", ["Up", "Down"], ["abc", "1"])
+        session.get = MagicMock(return_value=_FakeResponse(200, body))
+
+        tracker = _make_tracker(session)
+        result = await tracker.fetch_market_resolution("btc-updown-5m-1775650800")
+
+        assert result is not None
+        assert result.outcome == "down"
+
+    @pytest.mark.asyncio
+    async def test_none_price_value_skipped(self):
+        session = MagicMock()
+        body = _make_events_response("resolved", ["Up", "Down"], [None, "1"])
+        session.get = MagicMock(return_value=_FakeResponse(200, body))
+
+        tracker = _make_tracker(session)
+        result = await tracker.fetch_market_resolution("btc-updown-5m-1775650800")
+
+        assert result is not None
+        assert result.outcome == "down"
+
+    @pytest.mark.asyncio
+    async def test_insufficient_outcomes_returns_none(self):
+        """A single outcome/price, even with status=resolved, can't determine a winner."""
+        session = MagicMock()
+        body = _make_events_response("resolved", ["Up"], ["1"])
+        session.get = MagicMock(return_value=_FakeResponse(200, body))
+
+        tracker = _make_tracker(session)
+        result = await tracker.fetch_market_resolution("btc-updown-5m-1775650800")
+
+        assert result is None
+
 
 class TestFetchTokenIds:
     """Token discovery still uses /markets (which works for clobTokenIds)."""

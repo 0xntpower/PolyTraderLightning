@@ -7,7 +7,9 @@ from collections import deque
 import pytest
 
 from strategy.kelly import (
+    KELLY_FEEDBACK_CLAMP,
     KELLY_OUTCOME_WINDOW_SIZE,
+    KELLY_WIN_RATE_CEILING_BONUS,
     KELLY_WIN_RATE_FLOOR,
     AdjustedWinRateResult,
     BankrollTracker,
@@ -293,6 +295,21 @@ class TestEstimateAdjustedWinRate:
         assert 0.0 <= result.vol_severity <= 1.0
         assert 0.0 <= result.chop_severity <= 1.0
         assert 0.0 <= result.outcome_severity <= 1.0
+
+    def test_ceiling_clamp(self):
+        """adjusted_p never exceeds base_win_rate + KELLY_WIN_RATE_CEILING_BONUS,
+        even with maximally positive feedback (relocated from PolySignalLab root
+        tests/, adapted to the current outcome_agreement/weights signature)."""
+        outcomes = deque([1] * 20, maxlen=KELLY_OUTCOME_WINDOW_SIZE)  # 100% WR
+        result = self._call(recent_outcomes=outcomes, min_outcomes_for_feedback=10)
+        max_allowed = 0.90 + KELLY_WIN_RATE_CEILING_BONUS
+        assert result.adjusted_p <= max_allowed + 0.0001
+
+    def test_feedback_adjustment_saturates_at_clamp(self):
+        """Feedback magnitude is bounded by KELLY_FEEDBACK_CLAMP, not just signed."""
+        outcomes = deque([0] * 15, maxlen=KELLY_OUTCOME_WINDOW_SIZE)  # 0% WR, extreme
+        result = self._call(recent_outcomes=outcomes, min_outcomes_for_feedback=10)
+        assert result.feedback_adjustment == pytest.approx(-KELLY_FEEDBACK_CLAMP, abs=1e-6)
 
 
 class TestSoftOrCombineAndAdaptiveCap:

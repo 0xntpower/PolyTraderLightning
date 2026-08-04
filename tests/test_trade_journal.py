@@ -97,6 +97,15 @@ class TestTradeJournalPersistence:
         assert len(journal.read_trades(source="live")) == 1
         assert len(journal.read_trades(source="paper")) == 1
 
+    def test_read_trades_filters_by_since(self, tmp_path: Path) -> None:
+        journal = TradeJournal(tmp_path / "journal.jsonl")
+        journal.record_trade(_make_record(signal_id="sig_a", timestamp="2026-01-15T12:00:00+00:00"))
+        journal.record_trade(_make_record(signal_id="sig_b", timestamp="2026-01-16T12:00:00+00:00"))
+
+        filtered = journal.read_trades(since="2026-01-16T00:00:00+00:00")
+        assert len(filtered) == 1
+        assert filtered[0].signal_id == "sig_b"
+
     def test_read_trades_skips_malformed_lines(self, tmp_path: Path) -> None:
         path = tmp_path / "journal.jsonl"
         journal = TradeJournal(path)
@@ -115,6 +124,37 @@ class TestTradeJournalPersistence:
     def test_read_trades_on_missing_file_returns_empty(self, tmp_path: Path) -> None:
         journal = TradeJournal(tmp_path / "does_not_exist.jsonl")
         assert journal.read_trades() == []
+
+    def test_read_trades_skips_line_with_unexpected_field(self, tmp_path: Path) -> None:
+        """A JSON line with a field TradeRecord doesn't accept must be skipped, not crash."""
+        path = tmp_path / "journal.jsonl"
+        journal = TradeJournal(path)
+        journal.record_trade(_make_record(signal_id="sig_a"))
+
+        bad = json.dumps(
+            {
+                "timestamp": "2026-04-14T12:00:00+00:00",
+                "signal_id": "sig_future",
+                "signal_side": "up",
+                "window_ts": 99,
+                "fired": True,
+                "filled": True,
+                "won": True,
+                "entry_price": 0.55,
+                "pnl": 0.45,
+                "source": "paper",
+                "signal_age_windows": 5,
+                "extra_field_from_future": "surprise",
+            }
+        )
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(bad + "\n")
+
+        journal.record_trade(_make_record(signal_id="sig_b"))
+
+        records = journal.read_trades()
+        ids = {r.signal_id for r in records}
+        assert ids == {"sig_a", "sig_b"}
 
 
 # ---------------------------------------------------------------------------

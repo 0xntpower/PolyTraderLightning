@@ -15,18 +15,29 @@ from strategy.window_handler import _compute_snapshot_outcome, _window_decision_
 
 def _make_signal_cfg(side: Direction = Direction.UP) -> MomentumSignalConfig:
     return MomentumSignalConfig(
-        rank=1, side=side, observe_from_s=120.0, observe_to_s=60.0,
-        min_delta_pct=0.05, max_variance_pct=0.10,
-        train_win_rate_pct=90.0, oos_win_rate_pct=87.3,
-        bh_adjusted_p_value=0.001, oos_matches=100,
+        rank=1,
+        side=side,
+        observe_from_s=120.0,
+        observe_to_s=60.0,
+        min_delta_pct=0.05,
+        max_variance_pct=0.10,
+        train_win_rate_pct=90.0,
+        oos_win_rate_pct=87.3,
+        bh_adjusted_p_value=0.001,
+        oos_matches=100,
     )
 
 
 def _make_pending(side: Direction = Direction.UP, snapshot_outcome: str | None = "up"):
     return PendingResolution(
-        window_ts=1700000000, slug="test", signal_cfg=_make_signal_cfg(side),
-        entry_price=0.55, size_usd=10.0, signal_age_windows=5,
-        created_at=0, snapshot_outcome=snapshot_outcome,
+        window_ts=1700000000,
+        slug="test",
+        signal_cfg=_make_signal_cfg(side),
+        entry_price=0.55,
+        size_usd=10.0,
+        signal_age_windows=5,
+        created_at=0,
+        snapshot_outcome=snapshot_outcome,
     )
 
 
@@ -36,7 +47,6 @@ def _make_pending(side: Direction = Direction.UP, snapshot_outcome: str | None =
 
 
 class TestWindowDecisionTag:
-
     def test_win(self):
         tag, why = _window_decision_tag(True, True, True, True, None)
         assert tag == "[WIN]"
@@ -77,7 +87,6 @@ class TestWindowDecisionTag:
 
 
 class TestForceResolveOutcome:
-
     def test_with_snapshot(self):
         pr = _make_pending(side=Direction.UP, snapshot_outcome="up")
         assert ResolutionManager._force_resolve_outcome(pr) == "up"
@@ -101,7 +110,6 @@ class TestForceResolveOutcome:
 
 
 class TestComputeSnapshotOutcome:
-
     def test_none_snapshot(self):
         assert _compute_snapshot_outcome(None) is None
 

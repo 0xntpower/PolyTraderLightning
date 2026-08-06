@@ -16,7 +16,6 @@ from shared.risk import age_taper, compute_bet_scale, llr_confidence
 
 
 class TestLLRConfidence:
-
     def test_at_alive_boundary(self):
         """LLR at alive boundary → full confidence (1.0)."""
         assert llr_confidence(llr=-2.25, boundary_alive=-2.25, boundary_dead=2.89) == 1.0
@@ -54,7 +53,6 @@ class TestLLRConfidence:
 
 
 class TestAgeTaper:
-
     def test_before_taper_start(self):
         assert age_taper(50, taper_start=200, taper_end=400, floor=0.5) == 1.0
 
@@ -82,7 +80,6 @@ class TestAgeTaper:
 
 
 class TestComputeBetScale:
-
     def test_dormant_sprt_when_not_stale(self):
         """When signal is NOT stale, SPRT is dormant → scale depends only on age."""
         scale = compute_bet_scale(

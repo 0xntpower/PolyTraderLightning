@@ -18,12 +18,11 @@ from shared.decay_detector import DecayDetector
 
 
 class TestBoundaries:
-
     def test_boundaries_computed_correctly(self):
         """Verify Wald boundaries: dead = ln((1-beta)/alpha), alive = ln(beta/(1-alpha))."""
         d = DecayDetector("sig1", p_alive=0.65, p_dead=0.50, alpha=0.05, beta=0.10)
-        expected_dead = math.log(0.90 / 0.05)   # ln(18) ≈ 2.89
-        expected_alive = math.log(0.10 / 0.95)   # ln(0.1053) ≈ -2.25
+        expected_dead = math.log(0.90 / 0.05)  # ln(18) ≈ 2.89
+        expected_alive = math.log(0.10 / 0.95)  # ln(0.1053) ≈ -2.25
         assert d.state.boundary_dead == pytest.approx(expected_dead, abs=0.01)
         assert d.state.boundary_alive == pytest.approx(expected_alive, abs=0.01)
 
@@ -46,7 +45,6 @@ class TestBoundaries:
 
 
 class TestLLRAccumulation:
-
     def test_initial_state_inconclusive(self):
         d = DecayDetector("sig1", p_alive=0.70, p_dead=0.50)
         assert d.state.verdict == "INCONCLUSIVE"
@@ -105,7 +103,6 @@ class TestLLRAccumulation:
 
 
 class TestRollingWinRate:
-
     def test_rolling_wr_all_wins(self):
         d = DecayDetector("sig1", p_alive=0.70, p_dead=0.50)
         for _ in range(10):
@@ -143,7 +140,6 @@ class TestRollingWinRate:
 
 
 class TestReset:
-
     def test_reset_clears_llr_and_counts(self):
         d = DecayDetector("sig1", p_alive=0.70, p_dead=0.50)
         for _ in range(10):

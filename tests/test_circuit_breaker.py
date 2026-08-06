@@ -10,7 +10,6 @@ from utils.circuit_breaker import CircuitBreaker
 
 
 class TestCircuitBreakerStates:
-
     def test_starts_closed(self):
         cb = CircuitBreaker("test", failure_threshold=3)
         assert cb.state == "CLOSED"
@@ -87,9 +86,9 @@ class TestCircuitBreakerStates:
 
 
 class TestFeedStaleness:
-
     def test_fresh_feeds_not_stale(self):
         from market_data.state import MarketState
+
         state = MarketState()
         state.last_binance_msg_ts = time.time()
         state.last_chainlink_msg_ts = time.time()
@@ -98,6 +97,7 @@ class TestFeedStaleness:
 
     def test_binance_stale(self):
         from market_data.state import MarketState
+
         state = MarketState()
         state.last_binance_msg_ts = time.time() - 20
         state.last_chainlink_msg_ts = time.time()
@@ -106,6 +106,7 @@ class TestFeedStaleness:
 
     def test_chainlink_stale(self):
         from market_data.state import MarketState
+
         state = MarketState()
         state.last_binance_msg_ts = time.time()
         state.last_chainlink_msg_ts = time.time() - 40
@@ -114,6 +115,7 @@ class TestFeedStaleness:
 
     def test_clob_book_stale(self):
         from market_data.state import MarketState
+
         state = MarketState()
         state.last_binance_msg_ts = time.time()
         state.last_chainlink_msg_ts = time.time()
@@ -123,6 +125,7 @@ class TestFeedStaleness:
     def test_no_messages_yet_not_stale(self):
         """Feeds that haven't received any messages yet should NOT be flagged."""
         from market_data.state import MarketState
+
         state = MarketState()
         # All timestamps at 0.0 (default)
         assert state.is_feed_stale() is None
@@ -130,6 +133,7 @@ class TestFeedStaleness:
     def test_priority_order_binance_first(self):
         """Binance is checked first, so it should be reported even if others are also stale."""
         from market_data.state import MarketState
+
         state = MarketState()
         state.last_binance_msg_ts = time.time() - 20
         state.last_chainlink_msg_ts = time.time() - 40

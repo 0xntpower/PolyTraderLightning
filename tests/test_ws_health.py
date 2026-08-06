@@ -8,7 +8,6 @@ from utils.reconnect import FeedHealthMonitor, WsHealthState
 
 
 class TestWsHealthState:
-
     def test_connected_not_disconnected(self):
         hs = WsHealthState(name="test", is_connected=True)
         assert hs.seconds_disconnected() == 0.0
@@ -27,7 +26,6 @@ class TestWsHealthState:
 
 
 class TestFeedHealthMonitor:
-
     def test_register_and_lookup(self):
         monitor = FeedHealthMonitor()
         hs = monitor.register("binance")
